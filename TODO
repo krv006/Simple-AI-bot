@@ -1,5 +1,50 @@
-git add .
-git commit -m "first commit"
-git branch -M main
-git remote add origin https://github.com/krv006/Simple-AI-bot-.git
-git push -u origin main
+ai asosida qara filtering bolish kere
+masalan xar xil case larni aytaman qara
+
+qara masalan birnchi case tg guruhda xar xil sms la yuboriladi uladan faqat order ga kere boladiganlarini olishimiz kere
+
+Qandesan yaxshimisan -> kk emas
+assalomu alaykum -> kk emas
+
+USER di ID SI ORQALI ORDER DI TEKSHIRISH KERE BOLADI
+
+1 CASE
+901012311 -> kere bu keingi sms va oldingi sms di korib chiqish kere boladi
+bu nomerdan oldin qara qandedir raqam yokida ism keb qosa korib chiqishin mumkin boladi
+sababi bu shu nomerdi egasi yokida shu nomerga tegishli bolgan odam zakaz qilgan mahsulot ni narhi bolishi mumkin
+
+
+2 CASE
+location->sms->telefon raqam(//raqamlar)->comment -> bu bitta zakaz
+sms->location->telefon raqam(//raqamlar)->comment -> bu xam bitta zakaz
+telefon raqam(//raqamlar)->location->sms->comment -> bu xam bitta zakaz
+
+COMMENT -> qismda qara manzilini qolda yozib qoyishi mumkin
+masalan bitada 3 ta nomer tashalsa shu 3 lasdan bitasiga tel qiling deb qoyish mumkin
+eshik oldida kutib turing
+uyga olib chiqib bering
+moshinda kuting va yana shunga oxshash juda xam kop misollani kirtse boladi
+
+bular bazida bitada bazida esa bir nechta sms da yuboriladi
+
+mana shunday bolishi kere boladi
+
+3 CASE
+telefon raqam xar xil keb qolishi mumkin
+location
+
++998 91 123 12 12
++998911231212
+998 91 1231212
+va shunga oxshash mana shunday boladi kop casela bula uchun xam xammasini korib inobatga olib qoyish kere boladi
+
+location tg ozidan yuboriladi va unga link berish kere boladi yani qanday -> mijoszning manzili -> sozini oztida
+yuborilishi kere boladi
+
+
+xar qanday location jonatishi qib qoyish kere telegram ozidan location yuborish
+google ozidan va yandex dan location yuborish uchun moslash kere
+
+
+
+4 CASE
