@@ -7,17 +7,18 @@ from aiogram.enums import ChatType
 from aiogram.filters import CommandStart
 from aiogram.types import Message
 
+from ..ai.classifier import classify_text_ai
 from ..config import Settings
 from ..storage import (
     get_or_create_session,
     get_session_key,
     is_session_ready,
     finalize_session,
-    clear_session,   # ⬅️ YANGI IMPORT
+    clear_session,
+    save_order_to_json,
 )
-from ..utils.phones import extract_phones
 from ..utils.locations import extract_location_from_message
-from ..ai.classifier import classify_text_ai
+from ..utils.phones import extract_phones
 
 logger = logging.getLogger(__name__)
 
@@ -91,11 +92,6 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
             session.is_completed,
         )
 
-        # ❗ ESKI CHECKNI O'CHIRAMIZ:
-        # if session.is_completed:
-        #     logger.info("Session already completed, skipping.")
-        #     return
-
         if not is_session_ready(session):
             return
 
@@ -134,9 +130,11 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
             f"☕ Mahsulot/zakaz matni:\n{products_str}"
         )
 
+        save_order_to_json(finalized)
+        logger.info("Order saved to ai_bot.json for key=%s", key)
+
         logger.info("Sending order message to chat=%s", message.chat.id)
         await message.answer(msg_text)
 
-        # ✅ MUHIM: sessionni tozalaymiz – keyingi zakazlar uchun yangi boshlanadi
         clear_session(key)
         logger.info("Session cleared for key=%s", key)
