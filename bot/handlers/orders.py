@@ -146,7 +146,7 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
 
         msg_text = (
             f"🆕 Yangi zakaz\n"
-            f"👥 Guruh: {chat_title}\n"
+            f"👥 Guruhdan: {chat_title}\n"
             f"👤 Mijoz: {full_name} (id: {user.id})\n\n"
             f"📞 Telefon(lar): {phones_str}\n"
             f"📍 Manzil: {loc_str}\n"
@@ -157,8 +157,9 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         save_order_to_json(finalized)
         logger.info("Order saved to ai_bot.json for key=%s", key)
 
-        logger.info("Sending order message to chat=%s", message.chat.id)
-        await message.answer(msg_text)
+        target_chat_id = settings.send_group_id or message.chat.id
+        logger.info("Sending order to target group=%s", target_chat_id)
 
+        await message.bot.send_message(target_chat_id, msg_text)
         clear_session(key)
         logger.info("Session cleared for key=%s", key)

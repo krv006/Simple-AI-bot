@@ -48,6 +48,8 @@ def finalize_session(key: Tuple[int, int]) -> Optional[OrderSession]:
     session = SESSIONS.get(key)
     if not session:
         return None
+    if session.is_completed:
+        return None
     session.is_completed = True
     return session
 
