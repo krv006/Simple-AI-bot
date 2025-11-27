@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime, timezone
 
 from aiogram import Dispatcher, F
@@ -21,6 +22,111 @@ from ..utils.locations import extract_location_from_message
 from ..utils.phones import extract_phones
 
 logger = logging.getLogger(__name__)
+
+
+def _split_product_and_comment_texts(product_texts: list[str], comments: list[str]):
+    """
+    Kuryer/joylashuvga oid gaplarni product emas, comment qilib yuborish uchun
+    kichik heuristika.
+    Masalan: "Baliqchiga kuryer kk", "eshik oldida kutib turadi" va hokazo.
+    """
+    comment_keywords = [
+        "kuryer",
+        "kurier",
+        "kur'er",
+        "курьер",
+        "eshik oldida",
+        "uyga olib chiqib bering",
+        "moshinada kuting",
+        "машинада кутиб",
+        "baliqchiga",
+        "baliqchi",
+        "klientga",
+        "к клиенту",
+    ]
+
+    new_products: list[str] = []
+    new_comments = list(comments)
+
+    for text in product_texts:
+        low = text.lower()
+
+        has_digits = bool(re.search(r"\d", text))
+        if any(kw in low for kw in comment_keywords) and not has_digits:
+            new_comments.append(text)
+        else:
+            new_products.append(text)
+
+    return new_products, new_comments
+
+
+def _choose_client_phones(raw_messages: list[str], phones: set[str]) -> list[str]:
+    """
+    Matn ichida bir nechta telefon bo'lsa, faqat "mijoz" telefonini ajratishga harakat qiladi.
+    Heuristika:
+
+    - Agar telefon turgan qatorda "клиент", "mijoz" va shunga o'xshash so'zlar bo'lsa -> client phone.
+    - Agar qatorda "нашего магазина", "магазин", "our shop" bo'lsa -> bu client emas.
+    - Agar client_phones topilmasa, fallback qilib barcha telefonlarni qaytaramiz.
+    """
+    if not phones:
+        return []
+
+    lines: list[str] = []
+    for msg in raw_messages:
+        for line in msg.splitlines():
+            line = line.strip()
+            if line:
+                lines.append(line)
+
+    client_kw = [
+        "номер клиента",
+        "клиента",
+        "клиент",
+        "mijoz",
+        "mijoz tel",
+        "telefon klienta",
+        "номер клиентa",
+    ]
+    shop_kw = [
+        "номер нашего магазина",
+        "нашего магазина",
+        "магазин",
+        "magazin",
+        "our shop",
+        "номер магазина",
+    ]
+
+    client_phones: set[str] = set()
+    other_phones: set[str] = set()
+
+    for phone in phones:
+
+        phone_digits = re.sub(r"\D", "", phone)
+        if not phone_digits:
+            other_phones.add(phone)
+            continue
+
+        is_client = False
+        is_shop = False
+
+        for line in lines:
+            line_digits = re.sub(r"\D", "", line)
+            if phone_digits[-7:] in line_digits:
+                low = line.lower()
+                if any(kw in low for kw in shop_kw):
+                    is_shop = True
+                if any(kw in low for kw in client_kw):
+                    is_client = True
+
+        if is_client and not is_shop:
+            client_phones.add(phone)
+        else:
+            other_phones.add(phone)
+
+    if client_phones:
+        return sorted(client_phones)
+    return sorted(phones)
 
 
 def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
@@ -157,13 +263,19 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         if not finalized:
             return
 
+        cleaned_products, cleaned_comments = _split_product_and_comment_texts(
+            finalized.product_texts, finalized.comments
+        )
+
+        client_phones = _choose_client_phones(finalized.raw_messages, finalized.phones)
+
         chat_title = message.chat.title or "Noma'lum guruh"
         user = message.from_user
         full_name = user.full_name if user.full_name else f"id={user.id}"
 
-        phones_str = ", ".join(sorted(finalized.phones)) if finalized.phones else "—"
-        comment_str = "\n".join(finalized.comments) if finalized.comments else "—"
-        products_str = "\n".join(finalized.product_texts) if finalized.product_texts else "—"
+        phones_str = ", ".join(client_phones) if client_phones else "—"
+        comment_str = "\n".join(cleaned_comments) if cleaned_comments else "—"
+        products_str = "\n".join(cleaned_products) if cleaned_products else "—"
 
         loc = finalized.location
         if loc:
