@@ -13,6 +13,7 @@ from aiogram.types import Message
 
 from ..ai.classifier import classify_text_ai
 from ..config import Settings
+from ..db import save_order_row  # <<< YANGI IMPORT
 from ..storage import (
     get_or_create_session,
     get_session_key,
@@ -222,7 +223,7 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
 
         logger.info("AI result=%s", ai_result)
 
-        # === HAR BIR XABARNI AI_CHECK GURUHIGA YUBORISH ===
+        # === AI_CHECK GURUHIGA LOG ===
         if settings.ai_check_group_id:
             src_chat_title = message.chat.title or str(message.chat.id)
             user = message.from_user
@@ -262,7 +263,6 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
                     e,
                 )
 
-            # Dataset uchun yozib boramiz
             _append_dataset_line(
                 "ai_check.txt",
                 {
@@ -283,7 +283,7 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
                 },
             )
 
-        # === Eski role fallback va PRODUCT/COMMENT logika ===
+        # === Eski fallback PRODUCT/COMMENT ===
         low = text.lower()
         has_digits = any(ch.isdigit() for ch in text)
         money_kw = ["summa", "ming", "min", "мин", "минг", "сум", "сом", "тыс"]
@@ -298,7 +298,7 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
             if any(kw in low for kw in COMMENT_KEYWORDS):
                 role = "COMMENT"
 
-        # === NON-ORDER (error_group) LOGIKA ===
+        # === NON-ORDER error_group ===
         if (
                 settings.error_group_id
                 and not is_order_related
@@ -417,9 +417,11 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
             f"☕️ Mahsulot/zakaz matni:\n{products_str}"
         )
 
+        # JSON log
         save_order_to_json(finalized)
         logger.info("Order saved to ai_bot.json for key=%s", key)
 
+        # Dataset fayl
         _append_dataset_line(
             "order.txt",
             {
@@ -435,6 +437,21 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
             },
         )
 
+        # === YANGI: Postgres'ga yozamiz ===
+        try:
+            # Zakaz matni sifatida product_lines'dan foydalanamiz
+            order_text_for_db = products_str
+            save_order_row(
+                settings,
+                message=message,
+                phones=client_phones,
+                order_text=order_text_for_db,
+                location=finalized.location,
+            )
+        except Exception as e:
+            logger.error("Failed to save order to Postgres: %s", e)
+
+        # Guruhga zakaz yuborish
         target_chat_id = settings.send_group_id or message.chat.id
         logger.info("Sending order to target group=%s", target_chat_id)
 
@@ -446,6 +463,7 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
                 "Falling back to source chat_id=%s",
                 target_chat_id,
                 e,
+                message.chat.id,
             )
             await message.answer(msg_text)
 

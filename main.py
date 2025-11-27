@@ -3,26 +3,35 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 
 from bot.config import load_settings
-from bot.handlers import register_all_handlers
+from bot.db import init_db
+from bot.handlers.orders import register_order_handlers
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 
 
 async def main():
-    # Terminal uchun loglar
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
-
     settings = load_settings()
 
-    bot = Bot(token=settings.tg_bot_token)
+    if settings.db_dsn:
+        init_db(settings)
+
+    bot = Bot(
+        token=settings.tg_bot_token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+
     dp = Dispatcher()
 
-    register_all_handlers(dp, settings)
+    register_order_handlers(dp, settings)
 
-    logging.info("Bot ishga tushyapti...")
     await dp.start_polling(bot)
 
 
