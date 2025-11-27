@@ -1,3 +1,4 @@
+# bot/handlers/orders.py
 import logging
 import re
 from datetime import datetime, timezone
@@ -23,55 +24,35 @@ from ..utils.phones import extract_phones
 
 logger = logging.getLogger(__name__)
 
+COMMENT_KEYWORDS = [
+    "kuryer",
+    "kurier",
+    "kur'er",
+    "курьер",
+    "eshik oldida",
+    "uyga olib chiqib bering",
+    "moshinada kuting",
+    "машинада кутиб",
+    "baliqchiga",
+    "baliqchi",
+    "klientga",
+    "к клиенту",
+]
 
-def _split_product_and_comment_texts(product_texts: list[str], comments: list[str]):
-    """
-    Kuryer/joylashuvga oid gaplarni product emas, comment qilib yuborish uchun
-    kichik heuristika.
-    Masalan: "Baliqchiga kuryer kk", "eshik oldida kutib turadi" va hokazo.
-    """
-    comment_keywords = [
-        "kuryer",
-        "kurier",
-        "kur'er",
-        "курьер",
-        "eshik oldida",
-        "uyga olib chiqib bering",
-        "moshinada kuting",
-        "машинада кутиб",
-        "baliqchiga",
-        "baliqchi",
-        "klientga",
-        "к клиенту",
-    ]
 
-    new_products: list[str] = []
-    new_comments = list(comments)
-
-    for text in product_texts:
-        low = text.lower()
-
-        has_digits = bool(re.search(r"\d", text))
-        if any(kw in low for kw in comment_keywords) and not has_digits:
-            new_comments.append(text)
-        else:
-            new_products.append(text)
-
-    return new_products, new_comments
+def _normalize_digits(s: str) -> str:
+    return re.sub(r"\D", "", s or "")
 
 
 def _choose_client_phones(raw_messages: list[str], phones: set[str]) -> list[str]:
     """
-    Matn ichida bir nechta telefon bo'lsa, faqat "mijoz" telefonini ajratishga harakat qiladi.
-    Heuristika:
-
-    - Agar telefon turgan qatorda "клиент", "mijoz" va shunga o'xshash so'zlar bo'lsa -> client phone.
-    - Agar qatorda "нашего магазина", "магазин", "our shop" bo'lsa -> bu client emas.
-    - Agar client_phones topilmasa, fallback qilib barcha telefonlarni qaytaramiz.
+    Bir nechta telefon bo'lsa, "mijoz" telefonini tanlashga harakat qiladi.
+    Qolganlari (magazin / ofis) boshqa toifa hisoblanadi.
     """
     if not phones:
         return []
 
+    # Xabarlarni qatorma-qator qilib olamiz
     lines: list[str] = []
     for msg in raw_messages:
         for line in msg.splitlines():
@@ -86,7 +67,6 @@ def _choose_client_phones(raw_messages: list[str], phones: set[str]) -> list[str
         "mijoz",
         "mijoz tel",
         "telefon klienta",
-        "номер клиентa",
     ]
     shop_kw = [
         "номер нашего магазина",
@@ -101,8 +81,7 @@ def _choose_client_phones(raw_messages: list[str], phones: set[str]) -> list[str
     other_phones: set[str] = set()
 
     for phone in phones:
-
-        phone_digits = re.sub(r"\D", "", phone)
+        phone_digits = _normalize_digits(phone)
         if not phone_digits:
             other_phones.add(phone)
             continue
@@ -111,8 +90,10 @@ def _choose_client_phones(raw_messages: list[str], phones: set[str]) -> list[str
         is_shop = False
 
         for line in lines:
-            line_digits = re.sub(r"\D", "", line)
-            if phone_digits[-7:] in line_digits:
+            line_digits = _normalize_digits(line)
+            # Oxirgi 9 ta raqam bo‘yicha solishtiramiz
+            tail9 = phone_digits[-9:]
+            if tail9 and tail9 in line_digits:
                 low = line.lower()
                 if any(kw in low for kw in shop_kw):
                     is_shop = True
@@ -124,9 +105,76 @@ def _choose_client_phones(raw_messages: list[str], phones: set[str]) -> list[str
         else:
             other_phones.add(phone)
 
+    # Agar aniq mijoz raqamini topgan bo‘lsak – faqat shuni qaytaramiz
     if client_phones:
         return sorted(client_phones)
+
+    # Aks holda hammasini qaytaramiz
     return sorted(phones)
+
+
+def _build_final_texts(raw_messages: list[str], phones: set[str]):
+    """
+    Yakuniy product va comment matnlarini faqat raw_messages asosida quramiz.
+
+    - mijozning o'zi raqami turgan qator productga kirmaydi
+    - raqamli, lekin faqat telefon bo'lmagan satrlar (summa, vaqt, tavsif) productga tushadi
+    - COMMENT_KEYWORDS bo'lgan raqam-siz matnlar commentga tushadi
+    """
+    client_phones = _choose_client_phones(raw_messages, phones)
+    # mijoz raqami uchun oxirgi 9 ta raqamni olib solishtiramiz
+    client_digits = {
+        _normalize_digits(p)[-9:] for p in client_phones if _normalize_digits(p)
+    }
+
+    product_lines: list[str] = []
+    comment_lines: list[str] = []
+
+    for msg in raw_messages:
+        text = (msg or "").strip()
+        if not text:
+            continue
+
+        low = text.lower()
+        has_digits = any(ch.isdigit() for ch in text)
+        digits = _normalize_digits(text)
+
+        # Agar satr faqat mijoz telefoniga teng bo'lsa -> product emas
+        is_pure_client_phone = False
+        if has_digits and digits:
+            for cd in client_digits:
+                if cd and digits.endswith(cd) and 7 <= len(digits) <= 13:
+                    # odatda telefon uzunligi 9–13 raqam
+                    is_pure_client_phone = True
+                    break
+
+        if has_digits and not is_pure_client_phone:
+            # bu yerga summa, "412ming", "Summa 109000", kredit/oplacheno va h.k. kiradi
+            product_lines.append(text)
+            continue
+
+        # raqam yo'q bo'lsa:
+        if any(kw in low for kw in COMMENT_KEYWORDS):
+            comment_lines.append(text)
+        else:
+            # Masalan, "Kichik doner + kola" – raqam bo'lmasa ham product bo'lishi mumkin
+            product_lines.append(text)
+
+    return client_phones, product_lines, comment_lines
+
+
+def _has_product_candidate(raw_messages: list[str], phones: set[str]) -> bool:
+    """
+    Sessiyada productga o‘xshagan qatormiz bormi-yo‘qligini tekshiradi.
+    Faqat mijozning yalang‘och raqami bo‘lsa, bu product hisoblanmaydi.
+    """
+    client_phones, products, _comments = _build_final_texts(raw_messages, phones)
+    if not products:
+        return False
+    # xavfsizlik uchun: agar yagona product bo‘lsa va u client raqamiga aynan teng bo‘lsa – e’tiborga olmaymiz
+    if len(products) == 1 and products[0] in client_phones:
+        return False
+    return True
 
 
 def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
@@ -140,7 +188,6 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
 
     @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
     async def handle_group_message(message: Message):
-
         if message.from_user is None or message.from_user.is_bot:
             return
 
@@ -164,21 +211,23 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         session = get_or_create_session(settings, message)
         key = get_session_key(message)
 
+        # Agar bu user uchun sessiya allaqachon yakunlangan bo‘lsa – keyingi gaplar ignorda
         if session.is_completed:
             logger.info("Session already completed for key=%s, skipping.", key)
             return
 
+        # Hamma textlarni saqlaymiz – keyin shundan product/comment yig'amiz
         if text:
             session.raw_messages.append(text)
 
+        # --- Phones ---
         had_phones_before = bool(session.phones)
-
         phones = extract_phones(text)
         for p in phones:
             session.phones.add(p)
-
         phones_new = bool(session.phones) and not had_phones_before
 
+        # --- Location ---
         had_location_before = session.location is not None
         loc = extract_location_from_message(message)
         just_got_location = False
@@ -190,6 +239,7 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         logger.info("Current session phones=%s", session.phones)
         logger.info("Current session location=%s", session.location)
 
+        # --- AI classification faqat “zakazga aloqador/emas” va triggering uchun ---
         ai_result = await classify_text_ai(settings, text, session.raw_messages)
         role = ai_result.get("role", "UNKNOWN")
         has_addr_kw = ai_result.get("has_address_keywords", False)
@@ -197,6 +247,21 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
 
         logger.info("AI result=%s", ai_result)
 
+        low = text.lower()
+        has_digits = any(ch.isdigit() for ch in text)
+
+        # Qo‘shimcha rule-based: summa / min / ming kabi so‘zlar
+        if role == "UNKNOWN":
+            money_kw = ["summa", "suma", "sum", "ming", "min", "мин", "минг", "сум", "сом", "тыс"]
+            if has_digits or any(kw in low for kw in money_kw):
+                role = "PRODUCT"
+            if any(kw in low for kw in COMMENT_KEYWORDS):
+                role = "COMMENT"
+
+        # Bu paytgacha yig‘ilgan xabarlar ichida zakazga o‘xshagan qatormiz bormi?
+        has_product_candidate = _has_product_candidate(session.raw_messages, session.phones)
+
+        # Zakazga aloqador bo‘lmagan, telefon/loc yo‘q oddiy gaplarni error guruhga o‘tkazamiz
         if (
                 settings.error_group_id
                 and not is_order_related
@@ -222,36 +287,33 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
                     settings.error_group_id,
                     e,
                 )
-
             return
-
-        if role == "PRODUCT":
-            if text:
-                session.product_texts.append(text)
-        elif role == "COMMENT" or has_addr_kw:
-            if text:
-                session.comments.append(text)
 
         session.updated_at = datetime.now(timezone.utc)
 
         ready = is_session_ready(session)
-
         logger.info(
-            "Session ready=%s | is_completed=%s | just_got_location=%s | phones_new=%s",
+            "Session ready=%s | is_completed=%s | just_got_location=%s | phones_new=%s | has_product_candidate=%s",
             ready,
             session.is_completed,
             just_got_location,
             phones_new,
+            has_product_candidate,
         )
 
         if not ready or session.is_completed:
             return
 
+        # Finalize shartlari:
+        # 1) Lokatsiya endi keldi VA allaqachon productga o‘xshagan textlar bor
+        # 2) Yoki hozirgi xabar PRODUCT rolda bo‘lsa (summa / zakaz matni) va sessiya tayyor bo‘lsa
+        # 3) Yoki adres kalit so‘zlari bor bo‘lsa (has_addr_kw) va sessiya tayyor bo‘lsa
+        # 4) Yoki telefon endi keldi (phones_new) VA oldin product candidate bo‘lsa (masalan, avval summa + loc edi)
         should_finalize = (
-                just_got_location
-                or role == "PRODUCT"
-                or has_addr_kw
-                or phones_new
+                (just_got_location and has_product_candidate)
+                or (role == "PRODUCT" and ready)
+                or (has_addr_kw and ready)
+                or (phones_new and has_product_candidate and ready)
         )
 
         if not should_finalize:
@@ -263,19 +325,26 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         if not finalized:
             return
 
-        cleaned_products, cleaned_comments = _split_product_and_comment_texts(
-            finalized.product_texts, finalized.comments
+        # Yakuniy product/commentlarni faqat raw_messages asosida qayta hisoblaymiz
+        client_phones, final_products, final_comments = _build_final_texts(
+            finalized.raw_messages, finalized.phones
         )
 
-        client_phones = _choose_client_phones(finalized.raw_messages, finalized.phones)
+        # JSON uchun ham shu yangilangan qiymatlarni berib qo‘yamiz
+        try:
+            finalized.product_texts = final_products
+            finalized.comments = final_comments
+        except Exception:
+            # Agar dataclassda bu fieldlar bo‘lmasa ham bot yiqilmasin
+            pass
 
         chat_title = message.chat.title or "Noma'lum guruh"
         user = message.from_user
         full_name = user.full_name if user.full_name else f"id={user.id}"
 
         phones_str = ", ".join(client_phones) if client_phones else "—"
-        comment_str = "\n".join(cleaned_comments) if cleaned_comments else "—"
-        products_str = "\n".join(cleaned_products) if cleaned_products else "—"
+        comment_str = "\n".join(final_comments) if final_comments else "—"
+        products_str = "\n".join(final_products) if final_products else "—"
 
         loc = finalized.location
         if loc:
@@ -284,8 +353,8 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
                 lon = loc["lon"]
                 loc_str = f"Telegram location\nhttps://maps.google.com/?q={lat},{lon}"
             else:
-                raw = loc["raw"] or ""
-                loc_str = f"{loc['type']} location: {raw}"
+                raw_loc = loc["raw"] or ""
+                loc_str = f"{loc['type']} location: {raw_loc}"
         else:
             loc_str = "—"
 
@@ -296,7 +365,7 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
             f"📞 Telefon(lar): {phones_str}\n"
             f"📍 Manzil: {loc_str}\n"
             f"💬 Izoh/comment:\n{comment_str}\n\n"
-            f"☕ Mahsulot/zakaz matni:\n{products_str}"
+            f"☕️ Mahsulot/zakaz matni:\n{products_str}"
         )
 
         save_order_to_json(finalized)
