@@ -10,10 +10,18 @@ def _simple_rule_based(text: str) -> Dict[str, Any]:
     tl = text.lower()
 
     address_keywords = [
-        "dom", "kv", "kv.", "kvartira", "подъезд", "подьезд",
-        "uy", "eshik", " подъезд", "kvartir", "подъез", "подьез",
-        "дом", "улица", "улиц", "mavze", "orqa eshik", "oldi", "oldida",
-        "mahalla", "mahallasi", "rayon", "tuman", "район", "квартал",
+        "dom", "kv", "kv.", "kvartira",
+        "подъезд", "подьезд", "подъез", "подьез",
+        "podezd", "podyezd",
+        "uy", "eshik", " подъезд",
+        "kvartir", "подъезда", "подъезде",
+        "дом", "улица", "улиц",
+        "mavze", "mavzesi",
+        "orqa eshik", "oldi eshik",
+        "oldida", "oldida kutaman",
+        "mahalla", "mahallasi",
+        "rayon", "tuman", "район", "квартал",
+        "etaj", "этаж", "qavat",
     ]
 
     product_keywords = [

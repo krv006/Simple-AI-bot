@@ -1,4 +1,5 @@
 # bot/handlers/order.py
+import asyncio
 import json
 import logging
 import re
@@ -13,7 +14,7 @@ from aiogram.types import Message
 
 from ..ai.classifier import classify_text_ai
 from ..config import Settings
-from ..db import save_order_row  # <<< YANGI IMPORT
+from ..db import save_order_row
 from ..storage import (
     get_or_create_session,
     get_session_key,
@@ -32,14 +33,54 @@ COMMENT_KEYWORDS = [
     "kurier",
     "kur'er",
     "курьер",
+
     "eshik oldida",
+    "eshik oldida kut",
+    "eshik oldida kutib",
+    "eshik oldida kutib turaman",
+    "eshik oldida kutib turing",
+
     "uyga olib chiqib bering",
+    "uyga olib chiqib ber",
+    "uyga olib chiqing",
+    "uyga obchiqib bering",
+
+    "orqa eshik",
+    "oldi eshik",
+    "oldida kutaman",
+    "kutib turaman",
     "moshinada kuting",
     "машинада кутиб",
-    "baliqchiga",
-    "baliqchi",
-    "klientga",
+
     "к клиенту",
+    "klientga",
+
+    "подъезд",
+    "подьезд",
+    "подъез",
+    "подьез",
+    "podezd",
+    "podyezd",
+
+    "этаж",
+    "etaж",
+    "etaj",
+    "qavat",
+
+    "kvartira",
+    "kv.",
+    "kv ",
+    "квартир",
+    "кв ",
+
+    "dom",
+    "дом",
+    "uy",
+    "mahalla",
+    "mahallasi",
+    "mavze",
+    "район",
+    "tuman",
 ]
 
 
@@ -64,12 +105,19 @@ def _choose_client_phones(raw_messages: List[str], phones: set[str]) -> List[str
     client_kw = [
         "номер клиента",
         "клиента",
-        "клиент",
+        "клиент:",
+        "клиент ",
         "mijoz",
+        "mijoz:",
         "mijoz tel",
         "telefon klienta",
-        "номер клиентa",
+        "номер клиентa",  # 'a' latin varianti
+        "покупатель",
+        "номер покупателя",
+        "client",
+        "klient",
     ]
+
     shop_kw = [
         "номер нашего магазина",
         "нашего магазина",
@@ -78,16 +126,42 @@ def _choose_client_phones(raw_messages: List[str], phones: set[str]) -> List[str
         "magazin",
         "our shop",
         "номер магазина",
+        "kids plate",
+        "kidsplate",
+        "магазин детского питания",
+        "наша точка",
+        "наш номер",
+        "наш тел",
+        "наш телефон",
     ]
 
     phone_role: dict[str, str] = {p: "unknown" for p in phones}
 
+    # 1-PASS: butun xabar bo‘yicha kontekst
     for msg in raw_messages:
-        for line in msg.splitlines():
+        low_msg = (msg or "").lower()
+        msg_phones = extract_phones(msg)
+        if not msg_phones:
+            continue
+
+        msg_is_shop = any(kw in low_msg for kw in shop_kw)
+        msg_is_client = any(kw in low_msg for kw in client_kw)
+
+        for p in msg_phones:
+            if p not in phone_role:
+                phone_role[p] = "unknown"
+
+            if msg_is_shop:
+                phone_role[p] = "shop"
+            elif msg_is_client and phone_role.get(p) != "shop":
+                phone_role[p] = "client"
+
+    # 2-PASS: satr darajasida aniqlik kiritish
+    for msg in raw_messages:
+        for line in (msg or "").splitlines():
             line = line.strip()
             if not line:
                 continue
-
             low = line.lower()
             line_phones = extract_phones(line)
             if not line_phones:
@@ -105,14 +179,21 @@ def _choose_client_phones(raw_messages: List[str], phones: set[str]) -> List[str
                 elif is_client_line and phone_role.get(p) != "shop":
                     phone_role[p] = "client"
 
+    # NATIJA TANLASH
     client_phones = [p for p, role in phone_role.items() if role == "client"]
     if client_phones:
-        return sorted(client_phones)
+        # faqat klient raqamlari
+        return sorted(set(client_phones))
 
-    if len(phones) == 1:
-        return sorted(phones)
+    # klient aniqlanmagan bo‘lsa – shop bo‘lmaganlarini ko‘rib chiqamiz
+    non_shop_phones = [p for p, role in phone_role.items() if role != "shop"]
+    non_shop_phones = sorted(set(non_shop_phones))
 
-    return sorted(phones)
+    if len(non_shop_phones) == 1:
+        return non_shop_phones
+
+    # hech bo‘lmasa shop bo‘lmagan ham bo‘lmasa – hammasini qaytaramiz
+    return non_shop_phones or sorted(phones)
 
 
 def _build_final_texts(raw_messages: List[str], phones: set[str]):
@@ -135,6 +216,28 @@ def _build_final_texts(raw_messages: List[str], phones: set[str]):
         has_digits = any(ch.isdigit() for ch in text)
         digits = _normalize_digits(text)
 
+        # 1) Telefon satrlarini umuman tashlab yuboramiz (mahsulotga yoki izohga qo‘shmaymiz)
+        if extract_phones(text):
+            if any(
+                    kw in low
+                    for kw in [
+                        "номер телефона",
+                        "номер клиента",
+                        "телефон:",
+                        "telefon:",
+                        "телефон ",
+                        "telefon ",
+                    ]
+            ):
+                # bu satr faqat telefon haqida – yuqorida TELEFON(lar) da bor, shuning uchun tashlaymiz
+                continue
+
+        # 2) Avval izoh kalit so‘zlarini tekshiramiz – raqam bo‘lsa ham izohga tushishi mumkin
+        if any(kw in low for kw in COMMENT_KEYWORDS):
+            comment_lines.append(text)
+            continue
+
+        # 3) Faqat client raqam bilan cheklangan satrni mahsulotga qo‘shmaymiz
         is_pure_client_phone = False
         if has_digits and digits:
             for cd in client_digits:
@@ -143,18 +246,120 @@ def _build_final_texts(raw_messages: List[str], phones: set[str]):
                     break
 
         if has_digits and not is_pure_client_phone:
+            # bu raqamli satr, lekin telefon emas – summa, A/B nuqta va boshqalar
             product_lines.append(text)
             continue
 
-        if any(kw in low for kw in COMMENT_KEYWORDS):
-            comment_lines.append(text)
-        else:
-            product_lines.append(text)
+        # 4) Oddiy (raqamsiz) matnlar – default bo‘yicha mahsulot qismiga tushadi
+        product_lines.append(text)
 
     return client_phones, product_lines, comment_lines
 
 
 def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
+    async def _finalize_and_send_after_delay(
+            key: str,
+            base_message: Message,
+    ):
+        """
+        Session tayyor bo'lgach ham darhol emas, 5 sekunddan keyin finalize + send qilish.
+        Shu orada kelgan qo'shimcha izoh xabarlar ham session.raw_messages ichiga tushadi.
+        """
+        await asyncio.sleep(5)
+
+        finalized = finalize_session(key)
+        logger.info("Delayed finalize for key=%s, finalized=%s", key, bool(finalized))
+        if not finalized:
+            return
+
+        client_phones, final_products, final_comments = _build_final_texts(
+            finalized.raw_messages, finalized.phones
+        )
+
+        chat_title = base_message.chat.title or "Noma'lum guruh"
+        user = base_message.from_user
+        full_name = user.full_name if user and user.full_name else f"id={user.id}"
+
+        phones_str = ", ".join(client_phones) if client_phones else "—"
+        comment_str = "\n".join(final_comments) if final_comments else "—"
+        products_str = "\n".join(final_products) if final_products else "—"
+
+        loc = finalized.location
+        if loc:
+            if loc["type"] == "telegram":
+                lat = loc["lat"]
+                lon = loc["lon"]
+                loc_str = (
+                    f"Telegram location\nhttps://maps.google.com/?q={lat},{lon}"
+                )
+            else:
+                raw_loc = loc["raw"] or ""
+                loc_str = f"{loc['type']} location: {raw_loc}"
+        else:
+            loc_str = "—"
+
+        msg_text = (
+            f"🆕 Yangi zakaz\n"
+            f"👥 Guruhdan: {chat_title}\n"
+            f"👤 Mijoz: {full_name} (id: {user.id})\n\n"
+            f"📞 Telefon(lar): {phones_str}\n"
+            f"📍 Manzil: {loc_str}\n"
+            f"💬 Izoh/comment:\n{comment_str}\n\n"
+            f"☕️ Mahsulot/zakaz matni:\n{products_str}"
+        )
+
+        # JSON log
+        save_order_to_json(finalized)
+        logger.info("Order saved to ai_bot.json for key=%s", key)
+
+        # Dataset fayl
+        _append_dataset_line(
+            "order.txt",
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "type": "order",
+                "chat_id": base_message.chat.id,
+                "chat_title": chat_title,
+                "user_id": user.id,
+                "user_name": full_name,
+                "phones": client_phones,
+                "location": finalized.location,
+                "raw_messages": finalized.raw_messages,
+            },
+        )
+
+        # Postgres'ga yozish
+        try:
+            order_text_for_db = products_str
+            save_order_row(
+                settings,
+                message=base_message,
+                phones=client_phones,
+                order_text=order_text_for_db,
+                location=finalized.location,
+            )
+        except Exception as e:
+            logger.error("Failed to save order to Postgres: %s", e)
+
+        # Guruhga zakaz yuborish
+        target_chat_id = settings.send_group_id or base_message.chat.id
+        logger.info("Sending order to target group=%s", target_chat_id)
+
+        try:
+            await base_message.bot.send_message(target_chat_id, msg_text)
+        except TelegramBadRequest as e:
+            logger.error(
+                "Failed to send order to target_chat_id=%s: %s. "
+                "Falling back to source chat_id=%s",
+                target_chat_id,
+                e,
+                base_message.chat.id,
+            )
+            await base_message.answer(msg_text)
+
+        clear_session(key)
+        logger.info("Session cleared for key=%s", key)
+
     @dp.message(CommandStart())
     async def cmd_start(message: Message):
         await message.answer(
@@ -374,98 +579,11 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
             )
             return
 
-        finalized = finalize_session(key)
-        logger.info(
-            "Finalizing session key=%s, finalized=%s", key, bool(finalized)
-        )
-        if not finalized:
-            return
-
-        client_phones, final_products, final_comments = _build_final_texts(
-            finalized.raw_messages, finalized.phones
-        )
-
-        chat_title = message.chat.title or "Noma'lum guruh"
-        user = message.from_user
-        full_name = user.full_name if user.full_name else f"id={user.id}"
-
-        phones_str = ", ".join(client_phones) if client_phones else "—"
-        comment_str = "\n".join(final_comments) if final_comments else "—"
-        products_str = "\n".join(final_products) if final_products else "—"
-
-        loc = finalized.location
-        if loc:
-            if loc["type"] == "telegram":
-                lat = loc["lat"]
-                lon = loc["lon"]
-                loc_str = (
-                    f"Telegram location\nhttps://maps.google.com/?q={lat},{lon}"
-                )
-            else:
-                raw_loc = loc["raw"] or ""
-                loc_str = f"{loc['type']} location: {raw_loc}"
-        else:
-            loc_str = "—"
-
-        msg_text = (
-            f"🆕 Yangi zakaz\n"
-            f"👥 Guruhdan: {chat_title}\n"
-            f"👤 Mijoz: {full_name} (id: {user.id})\n\n"
-            f"📞 Telefon(lar): {phones_str}\n"
-            f"📍 Manzil: {loc_str}\n"
-            f"💬 Izoh/comment:\n{comment_str}\n\n"
-            f"☕️ Mahsulot/zakaz matni:\n{products_str}"
-        )
-
-        # JSON log
-        save_order_to_json(finalized)
-        logger.info("Order saved to ai_bot.json for key=%s", key)
-
-        # Dataset fayl
-        _append_dataset_line(
-            "order.txt",
-            {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "type": "order",
-                "chat_id": message.chat.id,
-                "chat_title": chat_title,
-                "user_id": user.id,
-                "user_name": full_name,
-                "phones": client_phones,
-                "location": finalized.location,
-                "raw_messages": finalized.raw_messages,
-            },
-        )
-
-        # === YANGI: Postgres'ga yozamiz ===
-        try:
-            # Zakaz matni sifatida product_lines'dan foydalanamiz
-            order_text_for_db = products_str
-            save_order_row(
-                settings,
-                message=message,
-                phones=client_phones,
-                order_text=order_text_for_db,
-                location=finalized.location,
+        asyncio.create_task(
+            _finalize_and_send_after_delay(
+                key=key,
+                base_message=message,
             )
-        except Exception as e:
-            logger.error("Failed to save order to Postgres: %s", e)
-
-        # Guruhga zakaz yuborish
-        target_chat_id = settings.send_group_id or message.chat.id
-        logger.info("Sending order to target group=%s", target_chat_id)
-
-        try:
-            await message.bot.send_message(target_chat_id, msg_text)
-        except TelegramBadRequest as e:
-            logger.error(
-                "Failed to send order to target_chat_id=%s: %s. "
-                "Falling back to source chat_id=%s",
-                target_chat_id,
-                e,
-                message.chat.id,
-            )
-            await message.answer(msg_text)
-
-        clear_session(key)
-        logger.info("Session cleared for key=%s", key)
+        )
+        logger.info("Finalize scheduled with 5s delay for key=%s", key)
+        return
