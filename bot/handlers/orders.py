@@ -10,11 +10,12 @@ from aiogram import Dispatcher, F
 from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery
 
 from ..ai.classifier import classify_text_ai
 from ..config import Settings
-from ..db import save_order_row
+from ..db import save_order_row, cancel_order_row
 from ..storage import (
     get_or_create_session,
     get_session_key,
@@ -111,7 +112,7 @@ def _choose_client_phones(raw_messages: List[str], phones: set[str]) -> List[str
         "mijoz:",
         "mijoz tel",
         "telefon klienta",
-        "номер клиентa",  # 'a' latin varianti
+        "номер клиентa",
         "покупатель",
         "номер покупателя",
         "client",
@@ -179,20 +180,16 @@ def _choose_client_phones(raw_messages: List[str], phones: set[str]) -> List[str
                 elif is_client_line and phone_role.get(p) != "shop":
                     phone_role[p] = "client"
 
-    # NATIJA TANLASH
     client_phones = [p for p, role in phone_role.items() if role == "client"]
     if client_phones:
-        # faqat klient raqamlari
         return sorted(set(client_phones))
 
-    # klient aniqlanmagan bo‘lsa – shop bo‘lmaganlarini ko‘rib chiqamiz
     non_shop_phones = [p for p, role in phone_role.items() if role != "shop"]
     non_shop_phones = sorted(set(non_shop_phones))
 
     if len(non_shop_phones) == 1:
         return non_shop_phones
 
-    # hech bo‘lmasa shop bo‘lmagan ham bo‘lmasa – hammasini qaytaramiz
     return non_shop_phones or sorted(phones)
 
 
@@ -216,7 +213,7 @@ def _build_final_texts(raw_messages: List[str], phones: set[str]):
         has_digits = any(ch.isdigit() for ch in text)
         digits = _normalize_digits(text)
 
-        # 1) Telefon satrlarini umuman tashlab yuboramiz (mahsulotga yoki izohga qo‘shmaymiz)
+        # Telefon satrlarini tashlab yuboramiz
         if extract_phones(text):
             if any(
                     kw in low
@@ -229,15 +226,14 @@ def _build_final_texts(raw_messages: List[str], phones: set[str]):
                         "telefon ",
                     ]
             ):
-                # bu satr faqat telefon haqida – yuqorida TELEFON(lar) da bor, shuning uchun tashlaymiz
                 continue
 
-        # 2) Avval izoh kalit so‘zlarini tekshiramiz – raqam bo‘lsa ham izohga tushishi mumkin
+        # Avval izoh kalit so‘zlari
         if any(kw in low for kw in COMMENT_KEYWORDS):
             comment_lines.append(text)
             continue
 
-        # 3) Faqat client raqam bilan cheklangan satrni mahsulotga qo‘shmaymiz
+        # Faqat client telefoni bo'lgan satrni productga qo‘shmaymiz
         is_pure_client_phone = False
         if has_digits and digits:
             for cd in client_digits:
@@ -246,17 +242,26 @@ def _build_final_texts(raw_messages: List[str], phones: set[str]):
                     break
 
         if has_digits and not is_pure_client_phone:
-            # bu raqamli satr, lekin telefon emas – summa, A/B nuqta va boshqalar
             product_lines.append(text)
             continue
 
-        # 4) Oddiy (raqamsiz) matnlar – default bo‘yicha mahsulot qismiga tushadi
         product_lines.append(text)
 
     return client_phones, product_lines, comment_lines
 
 
 def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
+    async def _auto_remove_cancel_keyboard(order_message: Message, delay: int = 10):
+        """
+        10 sekunddan keyin inline keyboardni avtomatik olib tashlash.
+        DB statusiga tegmaydi, faqat tugmani o'chiradi.
+        """
+        await asyncio.sleep(delay)
+        try:
+            await order_message.edit_reply_markup(reply_markup=None)
+        except TelegramBadRequest as e:
+            logger.warning("Failed to auto-remove inline keyboard: %s", e)
+
     async def _finalize_and_send_after_delay(
             key: str,
             base_message: Message,
@@ -328,25 +333,41 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
             },
         )
 
-        # Postgres'ga yozish
+        # 1) DB ga yozamiz (status = TRUE). save_order_row dan order_id qaytishi kerak.
+        order_id = None
         try:
-            order_text_for_db = products_str
-            save_order_row(
-                settings,
+            order_id = save_order_row(
+                settings=settings,
                 message=base_message,
                 phones=client_phones,
-                order_text=order_text_for_db,
+                order_text=products_str,
                 location=finalized.location,
             )
         except Exception as e:
             logger.error("Failed to save order to Postgres: %s", e)
 
-        # Guruhga zakaz yuborish
+        reply_markup = None
+        if order_id is not None:
+            reply_markup = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="❌ Buyurtmani bekor qilish",
+                            callback_data=f"cancel_order:{order_id}",
+                        )
+                    ]
+                ]
+            )
+
         target_chat_id = settings.send_group_id or base_message.chat.id
         logger.info("Sending order to target group=%s", target_chat_id)
 
         try:
-            await base_message.bot.send_message(target_chat_id, msg_text)
+            sent_msg = await base_message.bot.send_message(
+                target_chat_id,
+                msg_text,
+                reply_markup=reply_markup,
+            )
         except TelegramBadRequest as e:
             logger.error(
                 "Failed to send order to target_chat_id=%s: %s. "
@@ -355,11 +376,16 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
                 e,
                 base_message.chat.id,
             )
-            await base_message.answer(msg_text)
+            sent_msg = await base_message.answer(msg_text, reply_markup=reply_markup)
+
+        # 4) 10 sekunddan keyin inline keyboardni avtomatik olib tashlash
+        if reply_markup is not None:
+            asyncio.create_task(_auto_remove_cancel_keyboard(sent_msg, delay=10))
 
         clear_session(key)
         logger.info("Session cleared for key=%s", key)
 
+    # /start
     @dp.message(CommandStart())
     async def cmd_start(message: Message):
         await message.answer(
@@ -368,6 +394,7 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
             "Meni guruhga qo'shing va mijoz xabarlarini yuboring."
         )
 
+    # GROUP MESSAGE handler
     @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
     async def handle_group_message(message: Message):
         if message.from_user is None or message.from_user.is_bot:
@@ -587,3 +614,40 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         )
         logger.info("Finalize scheduled with 5s delay for key=%s", key)
         return
+
+    @dp.callback_query(F.data.startswith("cancel_order:"))
+    async def handle_cancel_order(callback: CallbackQuery):
+
+        data = callback.data or ""
+        try:
+            _, raw_id = data.split(":", 1)
+            order_id = int(raw_id)
+        except Exception:
+            await callback.answer("Noto'g'ri buyurtma ID.", show_alert=True)
+            return
+
+        try:
+            cancelled = cancel_order_row(settings=settings, order_id=order_id)
+        except Exception as e:
+            logger.error("Failed to cancel order_id=%s: %s", order_id, e)
+            await callback.answer("Bekor qilishda xatolik yuz berdi.", show_alert=True)
+            return
+
+        if not cancelled:
+            await callback.answer(
+                "Bu buyurtma allaqachon bekor qilingan yoki topilmadi.",
+                show_alert=True,
+            )
+            return
+
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except TelegramBadRequest:
+            pass
+
+        try:
+            await callback.message.reply("❌ Buyurtmangiz bekor qilindi.")
+        except TelegramBadRequest:
+            pass
+
+        await callback.answer()

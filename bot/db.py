@@ -2,8 +2,8 @@
 from typing import List, Optional
 
 import psycopg2
-from psycopg2.extras import Json
 from aiogram.types import Message
+from psycopg2.extras import Json
 
 from .config import Settings
 
@@ -11,9 +11,6 @@ _connection = None
 
 
 def _get_connection(settings: Settings):
-    """
-    Bitta global connection. Autocommit yoqilgan.
-    """
     global _connection
     if _connection is None or _connection.closed:
         if not settings.db_dsn:
@@ -39,23 +36,35 @@ def init_db(settings: Settings) -> None:
                 order_text      TEXT,
                 phones          TEXT[],
                 location        JSONB,
+                is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+                cancelled_at    TIMESTAMPTZ,
                 created_at      TIMESTAMPTZ DEFAULT now()
             );
+            """
+        )
+        # Agar eski jadval bo'lsa, ustunlarni ALter orqali qo'shik (xavfsiz varianti)
+        cur.execute(
+            """
+            ALTER TABLE ai_orders
+            ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE ai_orders
+            ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;
             """
         )
 
 
 def save_order_row(
-    settings: Settings,
-    *,
-    message: Message,
-    phones: Optional[List[str]],
-    order_text: str,
-    location: Optional[dict],
-) -> None:
-    """
-    Zakaz finalize bo'lganda DB ga yozish.
-    """
+        settings: Settings,
+        *,
+        message: Message,
+        phones: Optional[List[str]],
+        order_text: str,
+        location: Optional[dict],
+) -> int:
     conn = _get_connection(settings)
     user = message.from_user
 
@@ -74,8 +83,11 @@ def save_order_row(
                 group_title,
                 order_text,
                 phones,
-                location
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
+                location,
+                is_active,
+                cancelled_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, NULL)
+            RETURNING id;
             """,
             (
                 message.message_id,
@@ -89,3 +101,22 @@ def save_order_row(
                 Json(location) if location else None,
             ),
         )
+        new_id_row = cur.fetchone()
+        order_id = new_id_row[0]
+        return order_id
+
+
+def cancel_order_row(settings: Settings, order_id: int) -> bool:
+    conn = _get_connection(settings)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE ai_orders
+            SET is_active = FALSE,
+                cancelled_at = NOW()
+            WHERE id = %s
+              AND is_active = TRUE;
+            """,
+            (order_id,),
+        )
+        return cur.rowcount > 0
