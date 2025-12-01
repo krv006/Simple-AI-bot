@@ -15,6 +15,8 @@ from aiogram.types import (
 )
 
 from .order_finalize import finalize_and_send_after_delay
+from .order_manual import start_manual_order_after_cancel
+from .order_reply_update import handle_order_reply_update
 from .order_utils import (
     COMMENT_KEYWORDS,
     append_dataset_line,
@@ -29,9 +31,6 @@ from ..storage import (
 )
 from ..utils.locations import extract_location_from_message
 from ..utils.phones import extract_phones
-
-from .order_manual import manual_order_state, handle_manual_order_step, start_manual_order_after_cancel
-from .order_reply_update import handle_order_reply_update
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +50,6 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
     async def handle_group_message(message: Message):
         if message.from_user is None or message.from_user.is_bot:
             return
-
-        # 0) Agar qo'lda zakaz yaratish rejimida bo'lsa – faqat shu logikani ishlatamiz
-        manual_key = (message.chat.id, message.from_user.id)
-        if manual_key in manual_order_state:
-            handled_manual = await handle_manual_order_step(message, settings)
-            if handled_manual:
-                return
 
         # 1) Avval: agar eski zakaz xabariga reply bo'lsa – update logika (loc + phone)
         if message.reply_to_message:
@@ -197,11 +189,11 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
 
         # === NON-ORDER error_group ===
         if (
-            settings.error_group_id
-            and not is_order_related
-            and not phones_in_msg
-            and not message.location
-            and text.strip()
+                settings.error_group_id
+                and not is_order_related
+                and not phones_in_msg
+                and not message.location
+                and text.strip()
         ):
             src_chat_title = message.chat.title or str(message.chat.id)
             user = message.from_user
@@ -258,11 +250,11 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
             return
 
         should_finalize = (
-            just_got_location
-            or role == "PRODUCT"
-            or has_addr_kw
-            or phones_new
-            or has_product_candidate
+                just_got_location
+                or role == "PRODUCT"
+                or has_addr_kw
+                or phones_new
+                or has_product_candidate
         )
 
         if not should_finalize:
