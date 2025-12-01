@@ -14,15 +14,14 @@ from aiogram.types import (
     InlineKeyboardButton,
 )
 
-from .order_finalize import finalize_and_send_after_delay, auto_remove_cancel_keyboard
+from .order_finalize import finalize_and_send_after_delay
 from .order_utils import (
     COMMENT_KEYWORDS,
     append_dataset_line,
-    parse_order_message_text,
 )
 from ..ai.classifier import classify_text_ai
 from ..config import Settings
-from ..db import cancel_order_row, save_order_row
+from ..db import cancel_order_row
 from ..storage import (
     get_or_create_session,
     get_session_key,
@@ -31,405 +30,13 @@ from ..storage import (
 from ..utils.locations import extract_location_from_message
 from ..utils.phones import extract_phones
 
-logger = logging.getLogger(__name__)
+from .order_manual import manual_order_state, handle_manual_order_step, start_manual_order_after_cancel
+from .order_reply_update import handle_order_reply_update
 
-# (chat_id, user_id) -> {"step": "...", "from_order_id": int | None, "data": {...}}
-manual_order_state: dict = {}
+logger = logging.getLogger(__name__)
 
 
 def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
-    async def handle_order_reply_update(message: Message) -> bool:
-        """
-        Buyurtma xabariga reply qilingan xabarni qayta ishlash.
-        Hozircha:
-        - lokatsiya o'zgarsa
-        - telefon raqam(lar) o'zgarsa
-        eski buyurtmani BEKOR qilamiz va yangisini yaratamiz.
-        """
-        reply_msg = message.reply_to_message
-        if not reply_msg or not reply_msg.text:
-            return False
-
-        # Faqat zakaz xabarlariga ishlasin:
-        if not reply_msg.text.startswith("🆕 Yangi zakaz"):
-            return False
-
-        parsed = parse_order_message_text(reply_msg.text)
-        if not parsed:
-            return False
-
-        order_id = parsed["order_id"]
-        if not order_id:
-            return False
-
-        old_phones = parsed["phones"] or []
-        old_location_text = parsed.get("location_text")
-
-        new_loc = extract_location_from_message(message)
-        reply_text = message.text or message.caption or ""
-        reply_phones = extract_phones(reply_text)
-
-        old_phones_set = set(old_phones)
-        reply_phones_set = set(reply_phones)
-
-        phones_changed = bool(reply_phones_set) and (reply_phones_set != old_phones_set)
-        has_new_loc = bool(new_loc)
-
-        if not has_new_loc and not phones_changed:
-            return False
-
-        logger.info(
-            "Order reply update detected: order_id=%s, new_loc=%s, phones_changed=%s",
-            order_id,
-            new_loc,
-            phones_changed,
-        )
-
-        try:
-            cancelled = cancel_order_row(settings=settings, order_id=order_id)
-        except Exception as e:
-            logger.error("Failed to cancel order_id=%s on update: %s", order_id, e)
-            await message.reply(
-                "Eski buyurtmani bekor qilishda xatolik yuz berdi."
-            )
-            return True
-
-        if not cancelled:
-            await message.reply(
-                "Eski buyurtma topilmadi yoki allaqachon bekor qilingan."
-            )
-            return True
-
-        # Eski xabarni vizual belgilab qo'yamiz
-        reason_parts = []
-        if has_new_loc:
-            reason_parts.append("lokatsiya o‘zgartirildi")
-        if phones_changed:
-            reason_parts.append("telefon raqami(lar) o‘zgartirildi")
-
-        reason_text = ", ".join(reason_parts) if reason_parts else "ma'lumotlar yangilandi"
-
-        try:
-            await reply_msg.edit_text(
-                reply_msg.text
-                + f"\n\n❌ Buyurtma bekor qilingan ({reason_text})."
-            )
-        except TelegramBadRequest:
-            pass
-
-        # Eski xabardan product/comment va boshqa maydonlarni olib qolamiz
-        products_str = parsed["products"] or ""
-        comments_str = parsed["comments"] or ""
-        chat_title = parsed["chat_title"]
-        client_name = parsed["client_name"]
-        client_id = parsed["client_id"]
-
-        if phones_changed:
-            phones = sorted(reply_phones_set)
-        else:
-            phones = old_phones
-
-        phones_str = ", ".join(phones) if phones else "—"
-        comment_str = comments_str or "—"
-
-        if has_new_loc:
-            loc = new_loc
-            if loc["type"] == "telegram":
-                lat = loc["lat"]
-                lon = loc["lon"]
-                loc_str = f"Telegram location\nhttps://maps.google.com/?q={lat},{lon}"
-            else:
-                raw_loc = loc["raw"] or ""
-                loc_str = f"{loc['type']} location: {raw_loc}"
-        else:
-            if old_location_text and old_location_text != "—":
-                loc_str = old_location_text
-                loc = {
-                    "type": "text",
-                    "raw": old_location_text,
-                }
-            else:
-                loc_str = "—"
-                loc = None
-
-        # Yangi buyurtmani DB ga yozamiz
-        new_order_id = None
-        try:
-            new_order_id = save_order_row(
-                settings=settings,
-                message=message,  # update so'ragan foydalanuvchi sifatida yozamiz
-                phones=phones,
-                order_text=products_str,
-                location=loc,
-            )
-        except Exception as e:
-            logger.error("Failed to save updated order to Postgres: %s", e)
-            await message.reply(
-                "Yangilangan ma'lumotlar bilan buyurtmani saqlashda xato bo‘ldi."
-            )
-            return True
-
-        header_line = "🆕 Yangi zakaz (yangilangan)"
-        if new_order_id is not None:
-            header_line += f" (ID: {new_order_id})"
-
-        # Agar eski xabardan mijozni o‘qib olgan bo‘lsak – o‘shanini ishlatamiz
-        if client_name and client_id:
-            client_line = f"👤 Mijoz: {client_name} (id: {client_id})"
-        else:
-            user = message.from_user
-            full_name = (
-                user.full_name if user and user.full_name else f"id={user.id}"
-            )
-            client_line = f"👤 Mijoz: {full_name} (id: {user.id})"
-
-        msg_text = (
-            f"{header_line}\n"
-            f"👥 Guruhdan: {chat_title or (message.chat.title or 'Noma' 'lum guruh')}\n"
-            f"{client_line}\n\n"
-            f"📞 Telefon(lar): {phones_str}\n"
-            f"📍 Manzil: {loc_str}\n"
-            f"💬 Izoh/comment:\n{comment_str}\n\n"
-            f"☕️ Mahsulot/zakaz matni:\n{products_str}"
-        )
-
-        reply_markup = None
-        if new_order_id is not None:
-            reply_markup = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="❌ Buyurtmani bekor qilish",
-                            callback_data=f"cancel_order:{new_order_id}",
-                        )
-                    ]
-                ]
-            )
-
-        target_chat_id = settings.send_group_id or message.chat.id
-
-        try:
-            sent_msg = await message.bot.send_message(
-                target_chat_id,
-                msg_text,
-                reply_markup=reply_markup,
-            )
-        except TelegramBadRequest as e:
-            logger.error(
-                "Failed to send updated order to target chat=%s: %s",
-                target_chat_id,
-                e,
-            )
-            sent_msg = await message.answer(msg_text, reply_markup=reply_markup)
-
-        if reply_markup is not None:
-            asyncio.create_task(
-                auto_remove_cancel_keyboard(sent_msg, delay=30)
-            )
-
-        # Dataset uchun ham yozib qo'yamiz
-        append_dataset_line(
-            "order_updates.txt",
-            {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "type": "order_update",
-                "old_order_id": order_id,
-                "new_order_id": new_order_id,
-                "chat_id": message.chat.id,
-                "user_id": message.from_user.id if message.from_user else None,
-                "location": loc,
-                "phones_old": old_phones,
-                "phones_new": phones,
-                "location_updated": has_new_loc,
-                "phones_updated": phones_changed,
-            },
-        )
-
-        return True
-
-    async def handle_manual_order_step(message: Message) -> bool:
-        """
-        Bekor qilingan zakazdan keyin qo'lda yangi zakaz yaratish bosqichlari:
-        - amount
-        - location
-        - phones
-        """
-        if not message.from_user:
-            return False
-
-        key = (message.chat.id, message.from_user.id)
-        state = manual_order_state.get(key)
-        if not state:
-            return False
-
-        step = state.get("step")
-        data = state.setdefault("data", {})
-        text = (message.text or "").strip()
-
-        # 1) SUMMA
-        if step == "amount":
-            if not text:
-                await message.reply("Iltimos, zakaz summasini matn ko'rinishida yuboring (masalan: 150 000).")
-                return True
-
-            data["amount"] = text
-            state["step"] = "location"
-
-            await message.reply(
-                "Rahmat.\n"
-                "2️⃣ Endi manzilni yuboring.\n"
-                "Telegram lokatsiya yuborsangiz ham bo‘ladi, matn ko‘rinishida ham yozish mumkin."
-            )
-            return True
-
-        # 2) LOCATION
-        if step == "location":
-            loc = extract_location_from_message(message)
-            loc_text = None
-
-            if loc:
-                if loc["type"] == "telegram":
-                    lat = loc["lat"]
-                    lon = loc["lon"]
-                    loc_text = f"Telegram location\nhttps://maps.google.com/?q={lat},{lon}"
-                else:
-                    raw = loc.get("raw") or ""
-                    loc_text = raw or "—"
-            else:
-                # Lokatsiya yo'q, matn ko'rinishida bo'lsa – text'dan olamiz
-                if text:
-                    loc = {
-                        "type": "text",
-                        "raw": text,
-                    }
-                    loc_text = text
-                else:
-                    await message.reply(
-                        "Manzilni lokatsiya yoki matn ko‘rinishida yuboring."
-                    )
-                    return True
-
-            data["location"] = loc
-            data["location_text"] = loc_text
-            state["step"] = "phones"
-
-            await message.reply(
-                "3️⃣ Endi mijoz telefon raqamini yuboring (+998...).\n"
-                "Bir nechta bo‘lsa, vergul bilan ajratib yozing."
-            )
-            return True
-
-        # 3) PHONES
-        if step == "phones":
-            phones = extract_phones(message.text or "")
-            if not phones:
-                await message.reply(
-                    "Kamida bitta telefon raqam yuboring (+998...)."
-                )
-                return True
-
-            data["phones"] = phones
-
-            # Yangi buyurtmani DB ga yozamiz
-            try:
-                order_id = save_order_row(
-                    settings=settings,
-                    message=message,
-                    phones=phones,
-                    order_text=f"Qo'lda yaratilgan zakaz. Summa: {data.get('amount')}",
-                    location=data.get("location"),
-                )
-            except Exception as e:
-                logger.error("Failed to save manual order after cancel: %s", e)
-                await message.reply("Yangi buyurtmani saqlashda xato bo‘ldi.")
-                manual_order_state.pop(key, None)
-                return True
-
-            chat_title = message.chat.title or "Noma'lum guruh"
-            user = message.from_user
-            full_name = user.full_name if user and user.full_name else f"id={user.id}"
-
-            phones_str = ", ".join(phones) if phones else "—"
-            loc_text = data.get("location_text") or "—"
-            amount = data.get("amount") or "—"
-            from_order_id = state.get("from_order_id")
-
-            header_line = "🆕 Yangi zakaz (qo'lda)"
-            if order_id is not None:
-                header_line += f" (ID: {order_id})"
-
-            client_line = f"👤 Mijoz: {full_name} (id: {user.id})"
-
-            msg_text = (
-                f"{header_line}\n"
-                f"👥 Guruhdan: {chat_title}\n"
-                f"{client_line}\n\n"
-                f"📞 Telefon(lar): {phones_str}\n"
-                f"📍 Manzil: {loc_text}\n"
-                f"💰 Summa: {amount}\n"
-                f"💬 Izoh/comment:\n—\n\n"
-                f"☕️ Mahsulot/zakaz matni:\n"
-                f"Qo'lda yaratilgan zakaz (bekor qilingan eski ID: {from_order_id})"
-            )
-
-            reply_markup = None
-            if order_id is not None:
-                reply_markup = InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            InlineKeyboardButton(
-                                text="❌ Buyurtmani bekor qilish",
-                                callback_data=f"cancel_order:{order_id}",
-                            )
-                        ]
-                    ]
-                )
-
-            target_chat_id = settings.send_group_id or message.chat.id
-
-            try:
-                sent_msg = await message.bot.send_message(
-                    target_chat_id,
-                    msg_text,
-                    reply_markup=reply_markup,
-                )
-            except TelegramBadRequest as e:
-                logger.error(
-                    "Failed to send manual order to target chat=%s: %s",
-                    target_chat_id,
-                    e,
-                )
-                sent_msg = await message.answer(msg_text, reply_markup=reply_markup)
-
-            if reply_markup is not None:
-                asyncio.create_task(
-                    auto_remove_cancel_keyboard(sent_msg, delay=30)
-                )
-
-            append_dataset_line(
-                "orders_manual.txt",
-                {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "type": "manual_after_cancel",
-                    "from_order_id": from_order_id,
-                    "new_order_id": order_id,
-                    "chat_id": message.chat.id,
-                    "chat_title": chat_title,
-                    "user_id": user.id,
-                    "user_name": full_name,
-                    "amount": amount,
-                    "phones": phones,
-                    "location": data.get("location"),
-                    "location_text": loc_text,
-                },
-            )
-
-            await message.reply("✅ Yangi buyurtma yaratildi.")
-            manual_order_state.pop(key, None)
-            return True
-
-        return False
-
     # /start
     @dp.message(CommandStart())
     async def cmd_start(message: Message):
@@ -445,15 +52,16 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         if message.from_user is None or message.from_user.is_bot:
             return
 
-        key = (message.chat.id, message.from_user.id)
-        if key in manual_order_state:
-            handled_manual = await handle_manual_order_step(message)
+        # 0) Agar qo'lda zakaz yaratish rejimida bo'lsa – faqat shu logikani ishlatamiz
+        manual_key = (message.chat.id, message.from_user.id)
+        if manual_key in manual_order_state:
+            handled_manual = await handle_manual_order_step(message, settings)
             if handled_manual:
                 return
 
         # 1) Avval: agar eski zakaz xabariga reply bo'lsa – update logika (loc + phone)
         if message.reply_to_message:
-            handled = await handle_order_reply_update(message)
+            handled = await handle_order_reply_update(message, settings)
             if handled:
                 return
 
@@ -589,11 +197,11 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
 
         # === NON-ORDER error_group ===
         if (
-                settings.error_group_id
-                and not is_order_related
-                and not phones_in_msg
-                and not message.location
-                and text.strip()
+            settings.error_group_id
+            and not is_order_related
+            and not phones_in_msg
+            and not message.location
+            and text.strip()
         ):
             src_chat_title = message.chat.title or str(message.chat.id)
             user = message.from_user
@@ -650,11 +258,11 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
             return
 
         should_finalize = (
-                just_got_location
-                or role == "PRODUCT"
-                or has_addr_kw
-                or phones_new
-                or has_product_candidate
+            just_got_location
+            or role == "PRODUCT"
+            or has_addr_kw
+            or phones_new
+            or has_product_candidate
         )
 
         if not should_finalize:
@@ -747,22 +355,5 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         except Exception:
             from_order_id = None
 
-        if not callback.from_user:
-            await callback.answer()
-            return
-
-        key = (callback.message.chat.id, callback.from_user.id)
-        manual_order_state[key] = {
-            "step": "amount",
-            "from_order_id": from_order_id,
-            "data": {},
-        }
-
         await callback.answer()
-        try:
-            await callback.message.reply(
-                "Yangi zakaz yaratamiz.\n"
-                "1️⃣ Iltimos, zakaz summasini yozing (masalan: 150 000)."
-            )
-        except TelegramBadRequest:
-            pass
+        await start_manual_order_after_cancel(callback, from_order_id)
