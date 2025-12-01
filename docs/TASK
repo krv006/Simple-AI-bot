@@ -6,3 +6,15 @@ MIlenium AI uchun Millenium taxi apilarini o’rganib chiqish
 4) buyurtma yaratilganidan keyin kuryerga qo’shimcha habar bersa bo’ladimi yoki yo’q
 
 
+TASK FOR ME
+
+Guruh uchun yuborilgan yani yuborilgada xisoblanmagan xabar lardi bazaga qoshib ketishi kere va uni guruhlarda yozishsa 10 - 15 marotaba oqisin
+va ai ga oqitilganda xammasi uchun zakaz ga keresiz xabar boladgan bosa boshqa guruhda turmasin va db da saqlanb qolsin
+--qara xar bir guruh uchun aloxida aloxida bolishi kere boladi
+
+
+Comment qismda yana optimal qilish
+
+toliq errors la uchun code ni yozib chiqish -> location va phone number
+
+
