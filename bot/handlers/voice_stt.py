@@ -10,10 +10,10 @@ from aiogram.types import Message
 from bot.ai.stt_uzbekvoice import stt_uzbekvoice
 from bot.config import Settings
 from bot.storage import get_or_create_session
-from bot.utils.amounts import extract_amount_from_text  # summa uchun
+from bot.utils.amounts import extract_amount_from_text
 from bot.utils.phones import (
     extract_phones,
-    extract_spoken_phone_candidates,  # <<< YANGI import
+    extract_spoken_phone_candidates,
 )
 
 logger = logging.getLogger(__name__)
@@ -25,10 +25,17 @@ def register_voice_handlers(dp: Dispatcher, settings: Settings) -> None:
         F.voice,
     )
     async def handle_voice_message(message: Message):
+        """
+        Guruhga kelgan voice uchun:
+        1) Voice faylni Telegram'dan yuklaydi
+        2) Uzbekvoice.ai ga yuborib STT matn oladi
+        3) Matndan telefon(lar) va summani chiqarib, session ichida saqlaydi
+        4) Agar telefon/summa bo'lsa va location yo'q bo'lsa – location so'raydi
+        """
         if message.from_user is None or message.from_user.is_bot:
             return
 
-        if not settings.uzbekvoice_api_key:
+        if not getattr(settings, "uzbekvoice_api_key", None):
             await message.answer(
                 "STT servisi sozlanmagan (UZBEKVOICE_API_KEY). Admin bilan bog‘laning."
             )
@@ -62,7 +69,6 @@ def register_voice_handlers(dp: Dispatcher, settings: Settings) -> None:
 
             # 3. Session
             session = get_or_create_session(settings, message)
-
             if text:
                 session.raw_messages.append(text)
 
@@ -82,18 +88,17 @@ def register_voice_handlers(dp: Dispatcher, settings: Settings) -> None:
             for p in phones_in_msg:
                 session.phones.add(p)
 
-            session.updated_at = datetime.now(timezone.utc)
-
-            # 6. SUMMA ni chiqarib olamiz
+            # 6. SUMMA ni chiqarib olamiz va sessiyaga yozamiz
             amount = extract_amount_from_text(text)
             if amount is not None:
                 logger.info("Extracted amount from STT: %s", amount)
-                # sessiyaga yozib qo'yamiz, finalize paytida o'qib olamiz
                 setattr(session, "amount", amount)
 
-            # 7. Foydalanuvchiga ko'rsatish
+            session.updated_at = datetime.now(timezone.utc)
+
+            # 7. Foydalanuvchiga ko'rsatish (debug / tushunarli javob)
             reply_text = f"🎤 Golosdan olingan matn:\n\n{text}"
-            if amount:
+            if amount is not None:
                 reply_text += f"\n\n💰 Summa: {amount:,} so'm"
             if phones_in_msg:
                 reply_text += "\n\n📞 Telefon(lar):\n" + "\n".join(phones_in_msg)
@@ -116,8 +121,7 @@ def register_voice_handlers(dp: Dispatcher, settings: Settings) -> None:
                 "som",
             ]
             has_money_kw = any(kw in low for kw in money_kw)
-            has_amount_candidate = has_digits or has_money_kw or bool(amount)
-
+            has_amount_candidate = has_digits or has_money_kw or (amount is not None)
             has_phone_candidate = bool(session.phones)
 
             logger.info(
