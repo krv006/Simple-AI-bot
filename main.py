@@ -9,7 +9,7 @@ from aiogram.enums import ParseMode
 from bot.config import load_settings
 from bot.db import init_db
 from bot.handlers.orders import register_order_handlers
-
+from bot.handlers.status_checker import router as status_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,6 +29,7 @@ async def main():
     )
 
     dp = Dispatcher()
+    dp.include_router(status_router)
 
     register_order_handlers(dp, settings)
 

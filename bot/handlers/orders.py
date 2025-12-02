@@ -2,6 +2,7 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
+
 from aiogram import Dispatcher, F
 from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramBadRequest
@@ -13,6 +14,8 @@ from aiogram.types import (
     InlineKeyboardButton,
 )
 
+from bot.ai.status_intent import is_status_question
+from bot.utils.read_file import read_text_file
 from .order_finalize import finalize_and_send_after_delay
 from .order_manual import start_manual_order_after_cancel
 from .order_reply_update import handle_order_reply_update
@@ -170,6 +173,32 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
                     },
                 },
             )
+
+        if not phones_in_msg and not message.location and text.strip():
+            is_status = await is_status_question(
+                settings,
+                text,
+                session.raw_messages,
+            )
+            logger.info(
+                "Status intent: text=%r -> is_status=%s",
+                text,
+                is_status,
+            )
+
+            if is_status:
+                status_text = read_text_file("bot/a.txt")
+                logger.info(
+                    "Status so'rovi (AI) aniqlandi, a.txt javob qaytaryapman. "
+                    "chat=%s(%s) from=%s(%s) text=%r",
+                    message.chat.id,
+                    message.chat.title,
+                    message.from_user.id,
+                    message.from_user.full_name,
+                    text,
+                )
+                await message.reply(status_text)
+                return
 
         # === Eski fallback PRODUCT/COMMENT ===
         low = text.lower()
