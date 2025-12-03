@@ -5,8 +5,6 @@ from typing import Optional
 
 import requests
 
-from ..utils.numbers_uz import normalize_uzbek_numbers_in_text
-
 logger = logging.getLogger(__name__)
 
 UZBEKVOICE_STT_URL = "https://uzbekvoice.ai/api/v1/stt"
@@ -43,18 +41,13 @@ def _stt_sync(
     j = resp.json()
     logger.debug("Uzbekvoice response: %s", j)
 
-    text: Optional[str] = None
-
     if isinstance(j, dict):
         if "text" in j:
-            text = j["text"]
-        elif "result" in j and isinstance(j["result"], dict):
-            text = j["result"].get("text")
+            return j["text"]
+        if "result" in j and isinstance(j["result"], dict):
+            return j["result"].get("text")
 
-    if text:
-        text = normalize_uzbek_numbers_in_text(text)
-
-    return text
+    return None
 
 
 async def stt_uzbekvoice(

@@ -32,8 +32,8 @@ UNITS = {
     "besh": 5,
     "olti": 6,
     "yetti": 7,
+    "etti": 7,
     "sakkiz": 8,
-    "sakkizta": 8,
     "toqqiz": 9,
     "to'qqiz": 9,
     "toqiz": 9,
@@ -68,11 +68,6 @@ def _parse_number_tokens(tokens: List[str], start: int) -> Tuple[Optional[int], 
     """
     tokens[start:] dan boshlab uzbekcha son so'zlar ketma-ketligini integer ga aylantiradi.
 
-    Masalan:
-      ["uch", "yuz", "to'qqiz", "ming", "olti", "yuz"]  (start=0)
-        -> 309600, used=6
-      ["ikki", "yuz", "o'n", "besh"] -> 215, used=4
-
     Return:
       (value, used_count)
       agar son topilmasa: (None, 0)
@@ -106,7 +101,7 @@ def _parse_number_tokens(tokens: List[str], start: int) -> Tuple[Optional[int], 
                 current = 1
             current *= scale
 
-            # ming/million kabi so'zlar ko'pincha segment yakuni
+            # ming/million kabi so'zlar segment yakuni bo'lishi mumkin
             if scale >= 1000:
                 total += current
                 current = 0
@@ -123,8 +118,6 @@ def _parse_number_tokens(tokens: List[str], start: int) -> Tuple[Optional[int], 
         return None, 0
 
     total += current
-
-    # Faqat 0 topilgan bo'lsa ham uni qabul qilamiz (nol)
     return total, used
 
 
@@ -133,7 +126,6 @@ def _tokenize_text(text: str) -> List[str]:
     Matnni oddiy bo'shliqlar orqali tokenlarga bo'lamiz,
     lekin apostroflarni yo'qotmaymiz.
     """
-    # punctuation'larni bo'sh joyga almashtiramiz, lekin ' ni qoldiramiz
     cleaned = re.sub(r"[^\w\s'ʼ`’]", " ", text or "")
     tokens = [t for t in re.split(r"\s+", cleaned) if t]
     return tokens
@@ -147,24 +139,14 @@ def normalize_uzbek_numbers_in_text(text: str) -> str:
       "uch yuz to'qqiz"        -> "309"
       "ikki yuz o'n besh ming" -> "215000"
       "bir ming uch yuz ellik" -> "1350"
-
-    Matn ichida:
-      "uch yuz to'qqiz ming so'm" ->
-      "309000 so'm" (tokenlashga qarab, "uch yuz to'qqiz ming so'm" -> "309000 so'm")
     """
     if not text:
         return text
 
-    original_tokens = text.split()  # original ko'rinish (punctuation bilan birga bo'lishi mumkin)
-    # Parser uchun normalized tokenlar:
-    parsed_tokens = _tokenize_text(text)
-
-    # Agar token soni keskin farq qilsa, fallback sifatida parsed_tokens bilan ishlaymiz.
-    # reconstruct qilishni esa parsed_tokens bo'yicha qilamiz.
-    tokens = parsed_tokens
-
+    tokens = _tokenize_text(text)
     result_tokens: List[str] = []
     i = 0
+
     while i < len(tokens):
         value, used = _parse_number_tokens(tokens, i)
         if value is not None and used > 0:
@@ -177,3 +159,49 @@ def normalize_uzbek_numbers_in_text(text: str) -> str:
     new_text = " ".join(result_tokens)
     logger.info("[NUMBERS_UZ] text=%r -> %r", text, new_text)
     return new_text
+
+
+# ===== Summa chiqarish =====
+
+_AMOUNT_WITH_CURRENCY = re.compile(
+    r"(\d+)\s*(so['`ʼ’]m|som|sum|сум)",
+    re.IGNORECASE,
+)
+
+
+def extract_amount_from_text(text: str) -> Optional[int]:
+    """
+    STT matndan summani integer ko'rinishida chiqaradi.
+    Avval uzbekcha sonlarni raqamga aylantiradi, keyin raqamlarni qidiradi.
+
+      "besh yuz ming so'm" -> 500000
+      "uch yuz to'qqiz mingga" -> 309000 (agar shunday kontekst bo'lsa)
+
+    Strategiya:
+      1) normalize_uzbek_numbers_in_text()
+      2) so'm/сум yonidagi raqamlarni qidirish
+      3) topilmasa – matndagi eng katta raqamni olish
+    """
+    if not text:
+        return None
+
+    normalized = normalize_uzbek_numbers_in_text(text)
+
+    # 1) Valyuta bilan yozilgan raqamlar
+    matches = _AMOUNT_WITH_CURRENCY.findall(normalized)
+    if matches:
+        nums = [int(m[0]) for m in matches]
+        amount = max(nums)
+        logger.info("[AMOUNT] normalized=%r -> from currency=%s -> %s", normalized, nums, amount)
+        return amount
+
+    # 2) Fallback: matndagi barcha raqamlar ichidan eng kattasini olish
+    all_nums = re.findall(r"\d+", normalized)
+    if not all_nums:
+        logger.info("[AMOUNT] normalized=%r -> no digits found", normalized)
+        return None
+
+    nums_int = [int(n) for n in all_nums]
+    amount = max(nums_int)
+    logger.info("[AMOUNT] normalized=%r -> from digits=%s -> %s", normalized, nums_int, amount)
+    return amount

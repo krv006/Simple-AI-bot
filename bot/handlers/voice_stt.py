@@ -14,6 +14,7 @@ from bot.utils.amounts import extract_amount_from_text
 from bot.utils.phones import (
     extract_phones,
     extract_spoken_phone_candidates,
+    normalize_phone,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,7 @@ def register_voice_handlers(dp: Dispatcher, settings: Settings) -> None:
             bio.seek(0)
             file_bytes = bio.read()
 
-            # 2. Uzbekvoice STT
+            # 2. Uzbekvoice STT - faqat RAW text qaytadi
             text = await stt_uzbekvoice(
                 file_bytes=file_bytes,
                 api_key=settings.uzbekvoice_api_key,
@@ -67,24 +68,18 @@ def register_voice_handlers(dp: Dispatcher, settings: Settings) -> None:
             logger.info("STT text: %r", text)
             print(text)
 
-            # 3. Session
             session = get_or_create_session(settings, message)
             if text:
                 session.raw_messages.append(text)
 
-            # 4. Telefonlar: avval oddiy raqamli formatdan
             phones_in_msg = extract_phones(text)
 
-            # 5. So'z bilan aytilgan telefonlar
             spoken_digit_seqs = extract_spoken_phone_candidates(text)
             for seq in spoken_digit_seqs:
-                # Har bir digit seq uchun yana extract_phones ishlatamiz
-                more_phones = extract_phones(seq)
-                for p in more_phones:
-                    if p not in phones_in_msg:
-                        phones_in_msg.append(p)
+                p = normalize_phone(seq)
+                if p and p not in phones_in_msg:
+                    phones_in_msg.append(p)
 
-            # Endi barchasini session.phones ga qo'shamiz
             for p in phones_in_msg:
                 session.phones.add(p)
 

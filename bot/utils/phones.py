@@ -82,12 +82,13 @@ DIGIT_WORDS_PHONE = {
     "besh": "5",
     "olti": "6",
     "yetti": "7",
+    "etti": "7",  # STT ko'p hollarda "etti" deb beradi
     "sakkiz": "8",
     "toqqiz": "9",
     "to'qqiz": "9",
     "toqiz": "9",
 
-    # o'nliklar (ikkita raqam sifatida)
+    # o'nliklar (telefon uchun 2 raqam sifatida ko'rib, shu holatda qoldiramiz)
     "on": "10",
     "yigirma": "20",
     "ottiz": "30",
@@ -120,7 +121,7 @@ def _postprocess_phone_digits(seq: str) -> Optional[str]:
     Og'zaki son so'zlaridan yig'ilgan raqamlar ketma-ketligini
     telefon formatiga yaqinlashtirish uchun ishlov beramiz:
       - agar 9 dan uzun bo'lsa, oxirgi 9 raqamni olamiz
-      - minimal uzunlik 7-9 raqam
+      - minimal uzunlik 5 raqam (uzoqroq gaplardan ham nimadir olish uchun)
     """
     if not seq:
         return None
@@ -129,7 +130,8 @@ def _postprocess_phone_digits(seq: str) -> Optional[str]:
     if len(seq) > 9:
         seq = seq[-9:]
 
-    if len(seq) < 7:
+    # Avval 7 edi, hozir 5 qilib, juda qattiq filterni yumshatdik
+    if len(seq) < 5:
         return None
 
     return seq
@@ -138,11 +140,12 @@ def _postprocess_phone_digits(seq: str) -> Optional[str]:
 def extract_spoken_phone_candidates(text: str) -> List[str]:
     """
     STT matndan so'z bilan aytilgan raqamlar ketma-ketligini raqamga aylantiradi.
-    Masalan:
-      "raqamim to'qsonlik bir yuz yetti sakson ellik besh" ->
-         tokenlar: ["to'qsonlik", "bir", "yuz", "yetti", "sakson", "ellik", "besh"]
-         -> "90" + "1" + (yuz - tashlanadi) + "7" + "80" + "50" + "5"
-         -> "901780505"
+    Bu yerda biz SON so'zlar ketma-ketligidan raqam zanjiri yig'amiz:
+
+      "telefon raqami to'qson birlik bir yuz o'n bir o'n ikki oltmish uch"
+
+    kabi gaplarda ham hech bo'lmaganda biror raqamli ketma-ketlik olishga harakat qilamiz.
+
     Natijada faqat raqamlardan iborat ketma-ketliklar qaytariladi, masalan: ["901780505"].
     """
     cleaned = re.sub(r"[^\w\s'ʼ`’]", " ", text or "")
@@ -165,6 +168,7 @@ def extract_spoken_phone_candidates(text: str) -> List[str]:
         w = _normalize_token(tok)
 
         if w in DIGIT_WORDS_PHONE:
+            # Har bir son so'zini o'ziga tegishli raqam(lar)ga aylantiramiz
             current_digits.append(DIGIT_WORDS_PHONE[w])
             continue
 
