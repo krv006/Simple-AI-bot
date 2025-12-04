@@ -36,6 +36,7 @@ def init_db(settings: Settings) -> None:
                 order_text      TEXT,
                 phones          TEXT[],
                 location        JSONB,
+                amount          BIGINT,
                 is_active       BOOLEAN NOT NULL DEFAULT TRUE,
                 cancelled_at    TIMESTAMPTZ,
                 created_at      TIMESTAMPTZ DEFAULT now()
@@ -52,6 +53,12 @@ def init_db(settings: Settings) -> None:
             """
             ALTER TABLE ai_orders
             ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE ai_orders
+            ADD COLUMN IF NOT EXISTS amount BIGINT;
             """
         )
 
@@ -82,7 +89,12 @@ def save_order_row(
         phones: Optional[List[str]],
         order_text: str,
         location: Optional[dict],
+        amount: Optional[int] = None,
 ) -> int:
+    """
+    Yangi order yaratish.
+    Endi amount (BIGINT) ham saqlanadi.
+    """
     conn = _get_connection(settings)
     user = message.from_user
 
@@ -102,9 +114,10 @@ def save_order_row(
                 order_text,
                 phones,
                 location,
+                amount,
                 is_active,
                 cancelled_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, NULL)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, NULL)
             RETURNING id;
             """,
             (
@@ -117,6 +130,7 @@ def save_order_row(
                 order_text,
                 phones if phones else None,
                 Json(location) if location else None,
+                amount,
             ),
         )
         new_id_row = cur.fetchone()
@@ -136,6 +150,49 @@ def cancel_order_row(settings: Settings, order_id: int) -> bool:
               AND is_active = TRUE;
             """,
             (order_id,),
+        )
+        return cur.rowcount > 0
+
+
+def update_order_row(
+        settings: Settings,
+        order_id: int,
+        *,
+        phones: Optional[List[str]],
+        order_text: str,
+        location: Optional[dict],
+        amount: Optional[int],
+) -> bool:
+    """
+    Mavjud ai_orders yozuvini yangilash.
+    order_id bo'yicha:
+      - phones
+      - order_text
+      - location
+      - amount
+    ustunlari update qilinadi (faqat is_active = TRUE bo'lsa).
+    """
+    conn = _get_connection(settings)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE ai_orders
+            SET
+                phones     = %s,
+                order_text = %s,
+                location   = %s,
+                amount     = %s
+            WHERE id = %s
+              AND is_active = TRUE;
+            """,
+            (
+                phones if phones else None,
+                order_text,
+                Json(location) if location else None,
+                amount,
+                order_id,
+            ),
         )
         return cur.rowcount > 0
 

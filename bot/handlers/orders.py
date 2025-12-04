@@ -138,12 +138,14 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         if text:
             session.raw_messages.append(text)
 
+        # Telefon raqamlar
         had_phones_before = bool(session.phones)
         phones_in_msg = extract_phones(text)
         for p in phones_in_msg:
             session.phones.add(p)
         phones_new = bool(session.phones) and not had_phones_before
 
+        # Location
         had_location_before = session.location is not None
         loc = extract_location_from_message(message)
         just_got_location = False
@@ -156,8 +158,6 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         logger.info("Current session location=%s", session.location)
 
         # === YANGI: golosdan keyin location so‘rash ===
-        # 1-xabar: golos (summa + telefon) -> session.phones bor, lokatsiya yo'q.
-        # Shunda userga manzilni location qilib tashlang deb yozamiz.
         if (
                 message.voice  # aynan golosdan keyin
                 and session.phones  # telefon bor
@@ -170,17 +170,36 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
                 )
             except TelegramBadRequest:
                 pass
-            # bu yerda return QILMAYMIZ – order pipeline davom etadi,
-            # faqat userga eslatma berib qo'yadik.
+            # Pipeline davom etadi, faqat userga eslatma.
 
-        # === AI klassifikatsiya ===
+        # === AI klassifikatsiya (LangChain Structured Output) ===
         ai_result = await classify_text_ai(settings, text, session.raw_messages)
+        # kutiladigan maydonlar:
+        # role: str
+        # has_address_keywords: bool
+        # is_order_related: bool
+        # reason: str
+        # order_probability: float
+        # source: str
+        # amount: Optional[int]  # LangChain structured output dan
+
         role = ai_result.get("role", "UNKNOWN")
         has_addr_kw = ai_result.get("has_address_keywords", False)
         is_order_related = ai_result.get("is_order_related", False)
         reason = ai_result.get("reason") or ""
         order_prob = ai_result.get("order_probability", None)
         source = ai_result.get("source", "UNKNOWN")
+        amount = ai_result.get("amount")
+
+        # Agar AI summa topgan bo‘lsa – sessiyaga yozib qo‘yamiz
+        if amount is not None:
+            try:
+                # agar oldin summa bo'lmasa yoki 0 bo'lsa yangilaymiz
+                if getattr(session, "amount", None) in (None, 0):
+                    session.amount = int(amount)
+            except Exception:
+                # har ehtimolga qarshi, sessiya modeli o‘zgarmagan bo‘lsa ham bot yiqilmasin
+                logger.warning("Failed to set session.amount from ai_result: %r", amount)
 
         logger.info("AI result=%s", ai_result)
 
@@ -209,6 +228,9 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
 
             if isinstance(order_prob, (int, float)):
                 debug_text += f"- order ehtimoli: {order_prob:.2f}\n"
+
+            if amount is not None:
+                debug_text += f"- AI summa: {amount}\n"
 
             if reason:
                 debug_text += f"\nSabab:\n{reason}"
@@ -240,6 +262,7 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
                         "reason": reason,
                         "order_probability": order_prob,
                         "source": source,
+                        "amount": amount,
                     },
                 },
             )
@@ -331,10 +354,10 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
                 )
             return
 
-            # === Session update ===
+        # === Session update ===
         session.updated_at = datetime.now(timezone.utc)
 
-        # --- YANGI: butun sessiya bo‘yicha summa bor-yo‘qligini tekshiramiz ---
+        # --- Butun sessiya bo‘yicha summa / summa kandidati bor-yo‘qligini tekshiramiz ---
         all_text = " ".join(session.raw_messages).lower()
         has_digits_all = any(ch.isdigit() for ch in all_text)
         money_kw_all = [
@@ -354,6 +377,8 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
 
         ready_base = is_session_ready(session)
 
+        # Summa AI dan yoki matndan bo'lishi mumkin, shuning uchun
+        # base_ready + (location + summa kandidati) kombinatsiyasini ham hisobga olamiz
         ready = ready_base or (
                 session.location is not None and has_amount_candidate_all
         )
@@ -373,54 +398,13 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         if not ready or session.is_completed:
             return
 
-        # Finalize trigger shartlariga ham summa bo‘yicha flagni qo‘shamiz
         should_finalize = (
                 just_got_location
                 or role == "PRODUCT"
                 or has_addr_kw
                 or phones_new
                 or has_product_candidate
-                or has_amount_candidate_all  # <<< YANGI
-        )
-
-        if not should_finalize:
-            logger.info(
-                "Session is ready, but current message is not a finalize trigger."
-            )
-            return
-
-        asyncio.create_task(
-            finalize_and_send_after_delay(
-                key=key,
-                base_message=message,
-                settings=settings,
-            )
-        )
-        logger.info("Finalize scheduled with 5s delay for key=%s", key)
-        return
-        # === Session update ===
-        session.updated_at = datetime.now(timezone.utc)
-
-        ready = is_session_ready(session)
-        logger.info(
-            "Session ready=%s | is_completed=%s | just_got_location=%s | "
-            "phones_new=%s | has_product_candidate=%s",
-            ready,
-            session.is_completed,
-            just_got_location,
-            phones_new,
-            has_product_candidate,
-        )
-
-        if not ready or session.is_completed:
-            return
-
-        should_finalize = (
-                just_got_location
-                or role == "PRODUCT"
-                or has_addr_kw
-                or phones_new
-                or has_product_candidate
+                or has_amount_candidate_all
         )
 
         if not should_finalize:
@@ -454,7 +438,9 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
             cancelled = cancel_order_row(settings=settings, order_id=order_id)
         except Exception as e:
             logger.error("Failed to cancel order_id=%s: %s", order_id, e)
-            await callback.answer("Bekor qilishda xatolik yuz berdi.", show_alert=True)
+            await callback.answer(
+                "Bekor qilishda xatolik yuz berdi.", show_alert=True
+            )
             return
 
         if not cancelled:
@@ -469,7 +455,6 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         except TelegramBadRequest:
             pass
 
-        # Bekor bo'lgandan keyin YES/NO so'raymiz
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [

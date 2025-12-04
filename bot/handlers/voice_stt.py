@@ -111,27 +111,30 @@ def register_voice_handlers(dp: Dispatcher, settings: Settings) -> None:
                 final_amount = amount_rule
                 final_comment = text  # yoki bo'sh
 
-            # 9. Sessionga yozamiz
             for p in final_phones:
                 session.phones.add(p)
 
             if final_amount is not None:
-                setattr(session, "amount", final_amount)
+                session.amount = final_amount
 
             session.updated_at = datetime.now(timezone.utc)
 
-            # 10. Foydalanuvchiga ko'rsatish
             reply_text = f"🎤 Golosdan olingan matn:\n\n{text}"
 
             if final_amount is not None:
-                reply_text += f"\n\n💰 Summa: {final_amount:,} so'm"
+                reply_text += f"\n\n💰 Summa: {final_amount:,} so'm".replace(",", " ")
 
             if final_phones:
                 reply_text += "\n\n📞 Telefon(lar):\n" + "\n".join(final_phones)
 
-            # Izoh sifatida AI comment'ini ham qo'shsak bo'ladi (ixtiyoriy)
             if ai_result is not None and ai_result.comment:
                 reply_text += f"\n\n💬 Izoh (AI):\n{ai_result.comment}"
+
+            reply_text += (
+                "\n\nℹ️ Agar summa yoki telefon xato bo‘lgan bo‘lsa, "
+                "keyingi golos yoki matnli xabarda to‘g‘rilab aytsangiz, "
+                "bot avtomatik yangilaydi. Manzilni esa location qilib yuboring."
+            )
 
             await message.answer(reply_text)
 
