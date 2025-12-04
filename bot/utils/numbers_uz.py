@@ -37,10 +37,12 @@ UNITS = {
     "toqqiz": 9,
     "to'qqiz": 9,
     "toqiz": 9,
+    "to'qqi": 9,  # STT xatosi uchun alias
 }
 
 TENS = {
     "on": 10,
+    "o'n": 10,
     "yigirma": 20,
     "ottiz": 30,
     "o'ttiz": 30,
@@ -62,6 +64,121 @@ SCALES = {
     "milliard": 1_000_000_000,
     "mln": 1_000_000,
 }
+
+# ==== TELEFON RAQAMLARI UCHUN (spoken words -> digit string) ====
+
+
+PHONE_HUNDREDS = {"yuz", "yuzta"}
+
+
+def _normalize_phone_word(word: str) -> str:
+    """
+    Siz yozgan normalize_word bilan bir xil, faqat _norm ishlatamiz:
+
+      - lower + apostrof normalize
+      - oxiridagi 'ta' / 'lik' qo'shimchalarini kesib tashlaymiz:
+          'to'qsonlik' -> 'to'qson'
+          'birlik'     -> 'bir'
+          'yuzta'      -> 'yuz'
+    """
+    w = _norm(word)
+
+    if w.endswith("ta"):
+        base = w[:-2]
+        if base in PHONE_HUNDREDS or base in UNITS or base in TENS:
+            w = base
+
+    if w.endswith("lik"):
+        base = w[:-3]
+        if base in PHONE_HUNDREDS or base in UNITS or base in TENS:
+            w = base
+
+    return w
+
+
+def spoken_phone_words_to_digits(text: str) -> str:
+    """
+    Siz bergan words_to_digits() algoritmini shu yerga moslab ko'chirdik.
+
+    Misollar (xuddi o'sha natija chiqadi):
+      "to'qsonlik bir yuz etti sakson ellik besh" -> "901078055"
+      "to'qsonlik to'qqi yuz yetmish besh ellik ikki o'n bir" -> ...
+      "to'qson birlik" -> "91"
+      "yetmish yettilik" -> "77"
+      "to'qson birlik yetmish yettilik" -> "9177"
+      "yetmish yettilik nol yigirma ikki o'n besh yigirma" -> "770221520"
+    """
+    if not text:
+        return ""
+
+    # Siz .split() qilgansiz – shu xulqni saqlaymiz, faqat punctuatsiyani bo'shliq
+    # bilan almashtirib, apostroflarni saqlab qolamiz.
+    cleaned = re.sub(r"[^\w\s'ʼ`’]", " ", text)
+    words = [w for w in cleaned.split() if w]
+
+    res: list[str] = []
+    i = 0
+    n = len(words)
+
+    while i < n:
+        raw = words[i]
+        w = _normalize_phone_word(raw)
+
+        # (bir|ikki|...) + yuz/yuzta -> 100..900 (+ keyingi onlar/birlar)
+        if w in UNITS and i + 1 < n and _normalize_phone_word(words[i + 1]) in PHONE_HUNDREDS:
+            base = UNITS[w] * 100
+            j = i + 2
+
+            if j < n:
+                w3 = _normalize_phone_word(words[j])
+                if w3 in TENS:
+                    base += TENS[w3]
+                    j += 1
+                    if j < n:
+                        w4 = _normalize_phone_word(words[j])
+                        if w4 in UNITS:
+                            base += UNITS[w4]
+                            j += 1
+                elif w3 in UNITS:
+                    base += UNITS[w3]
+                    j += 1
+
+            res.append(str(base))
+            i = j
+            continue
+
+        # onlar (+birlar) -> 10..99
+        if w in TENS:
+            val = TENS[w]
+            j = i + 1
+
+            if j < n:
+                w2 = _normalize_phone_word(words[j])
+                if w2 in UNITS and not (
+                    j + 1 < n and _normalize_phone_word(words[j + 1]) in PHONE_HUNDREDS
+                ):
+                    val += UNITS[w2]
+                    j += 1
+
+            res.append(str(val))
+            i = j
+            continue
+
+        # faqat birlar
+        if w in UNITS:
+            res.append(str(UNITS[w]))
+            i += 1
+            continue
+
+        # boshqa so'z -> tashlab ketamiz
+        i += 1
+
+    digit_str = "".join(res)
+    logger.info("[PHONE_WORDS] text=%r -> %r", text, digit_str)
+    return digit_str
+
+
+# ========== QUYIDAGI QISM – SUMMA UCHUN. TEGMAYMIZ. ==========
 
 
 def _parse_number_tokens(tokens: List[str], start: int) -> Tuple[Optional[int], int]:

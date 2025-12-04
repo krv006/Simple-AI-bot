@@ -3,9 +3,10 @@ import logging
 import re
 from typing import List, Optional, Set
 
+from bot.utils.numbers_uz import spoken_phone_words_to_digits
+
 logger = logging.getLogger(__name__)
 
-# Raqamli telefonlarni topish uchun regex (matndan)
 PHONE_REGEX = re.compile(r"(\+?\d(?:[ \-\(\)]*\d){7,})")
 
 
@@ -59,7 +60,6 @@ def extract_phones(text: str) -> List[str]:
         matches,
         result,
     )
-    # Debug uchun konsolga ham chiqaramiz
     print(f"[PHONES] text={text!r} -> matches={matches} -> normalized={result}")
 
     return result
@@ -67,72 +67,25 @@ def extract_phones(text: str) -> List[str]:
 
 # ========== Og'zaki telefon raqamlari (so'z bilan aytilgan) ==========
 
-# Og'zaki telefon uchun son so'zlar -> raqamlar.
-# E’TIBOR: bu yerda "yuz", "ming" va h.k. telefon uchun FOYDALANILMAYDI.
-DIGIT_WORDS_PHONE = {
-    # birliklar
-    "nol": "0",
-    "nolik": "0",
-    "bir": "1",
-    "ikki": "2",
-    "uch": "3",
-    "tort": "4",
-    "to'rt": "4",
-    "turt": "4",
-    "besh": "5",
-    "olti": "6",
-    "yetti": "7",
-    "etti": "7",  # STT ko'p hollarda "etti" deb beradi
-    "sakkiz": "8",
-    "toqqiz": "9",
-    "to'qqiz": "9",
-    "toqiz": "9",
-
-    # o'nliklar (telefon uchun 2 raqam sifatida ko'rib, shu holatda qoldiramiz)
-    "on": "10",
-    "yigirma": "20",
-    "ottiz": "30",
-    "o'ttiz": "30",
-    "qirq": "40",
-    "ellik": "50",
-    "oltmish": "60",
-    "yetmish": "70",
-    "sakson": "80",
-    "to'qson": "90",
-    "toqson": "90",
-    "to'qsonlik": "90",
-    "toqsonlik": "90",
-}
-
-
-def _normalize_token(w: str) -> str:
-    w = w.lower()
-    w = (
-        w.replace("’", "'")
-        .replace("`", "'")
-        .replace("‘", "'")
-        .replace("ʼ", "'")
-    )
-    return w
-
 
 def _postprocess_phone_digits(seq: str) -> Optional[str]:
     """
     Og'zaki son so'zlaridan yig'ilgan raqamlar ketma-ketligini
     telefon formatiga yaqinlashtirish uchun ishlov beramiz:
-      - agar 9 dan uzun bo'lsa, oxirgi 9 raqamni olamiz
-      - minimal uzunlik 5 raqam (uzoqroq gaplardan ham nimadir olish uchun)
+
+      - agar 9 dan uzun bo'lsa, BIRINCHI 9 raqamni olamiz
+      - minimal uzunlik 9 raqam (to'liq o'zbek nomer)
     """
     if not seq:
         return None
 
-    # Juda uzun bo'lsa – oxirgi 9 raqamni olamiz
-    if len(seq) > 9:
-        seq = seq[-9:]
-
-    # Avval 7 edi, hozir 5 qilib, juda qattiq filterni yumshatdik
-    if len(seq) < 5:
+    # Minimal – to'liq o'zbek nomer uzunligi (9 ta raqam)
+    if len(seq) < 9:
         return None
+
+    # Juda uzun bo'lsa – birinchi 9 raqamni olamiz (oxiridagi summa va h.k. larni kesib tashlaymiz)
+    if len(seq) > 9:
+        seq = seq[:9]
 
     return seq
 
@@ -140,67 +93,53 @@ def _postprocess_phone_digits(seq: str) -> Optional[str]:
 def extract_spoken_phone_candidates(text: str) -> List[str]:
     """
     STT matndan so'z bilan aytilgan raqamlar ketma-ketligini raqamga aylantiradi.
-    Bu yerda biz SON so'zlar ketma-ketligidan raqam zanjiri yig'amiz:
+    Bu yerda biz bot.utils.numbers_uz.spoken_phone_words_to_digits funksiyasidan
+    foydalanamiz (siz yozgan logic asosida).
 
-      "telefon raqami to'qson birlik bir yuz o'n bir o'n ikki oltmish uch"
+    Misollar:
+      "to'qsonlik bir yuz etti sakson ellik besh"
+        -> spoken_phone_words_to_digits(...) = "901078055"
+        -> ["901078055"]
 
-    kabi gaplarda ham hech bo'lmaganda biror raqamli ketma-ketlik olishga harakat qilamiz.
-
-    Natijada faqat raqamlardan iborat ketma-ketliklar qaytariladi, masalan: ["901780505"].
+      "tezkur yol kerak to'qsonlik bir yuz yetti sakson lik besh raqamiga besh yuz ming so'm chilonzor"
+        -> spoken_phone_words_to_digits(...) taxminan "901078055500"
+        -> _postprocess_phone_digits(...) -> "901078055"
+        -> ["901078055"]
     """
-    cleaned = re.sub(r"[^\w\s'ʼ`’]", " ", text or "")
-    tokens = [t for t in re.split(r"\s+", cleaned) if t]
+    if not text:
+        return []
 
-    digit_sequences: List[str] = []
-    current_digits: List[str] = []
+    digit_str = spoken_phone_words_to_digits(text)
+    digit_str = re.sub(r"\D", "", digit_str or "")
 
-    def flush():
-        nonlocal current_digits, digit_sequences
-        if not current_digits:
-            return
-        raw_seq = "".join(current_digits)
-        processed = _postprocess_phone_digits(raw_seq)
-        if processed:
-            digit_sequences.append(processed)
-        current_digits = []
+    if not digit_str:
+        logger.info("[SPOKEN_PHONES] text=%r -> no digit_str", text)
+        return []
 
-    for tok in tokens:
-        w = _normalize_token(tok)
+    processed = _postprocess_phone_digits(digit_str)
+    if not processed:
+        logger.info(
+            "[SPOKEN_PHONES] text=%r -> digit_str=%r is too short/invalid",
+            text,
+            digit_str,
+        )
+        return []
 
-        if w in DIGIT_WORDS_PHONE:
-            # Har bir son so'zini o'ziga tegishli raqam(lar)ga aylantiramiz
-            current_digits.append(DIGIT_WORDS_PHONE[w])
-            continue
+    logger.info(
+        "[SPOKEN_PHONES] text=%r -> digit_str=%r -> %s",
+        text,
+        digit_str,
+        processed,
+    )
+    return [processed]
 
-        # "yuz", "ming", "million" va hokazo – telefon uchun tashlab yuboramiz
-        if w in {"yuz", "ming", "million", "mln"}:
-            continue
-
-        # Boshqa so'z bo'lsa – ketma-ketlikni yakunlaymiz
-        flush()
-
-    flush()
-
-    # Duplicatlarni olib tashlaymiz
-    unique: List[str] = []
-    for seq in digit_sequences:
-        if seq not in unique:
-            unique.append(seq)
-
-    logger.info("[SPOKEN_PHONES] text=%r -> digit_seqs=%s", text, unique)
-    return unique
-
-
-# ========== Display uchun formatlash (90 107 80 55) ==========
 
 def format_phone_display(phone: str) -> str:
     """
-    Telefonni ko‘rinadigan formatga bo‘ladi.
     +998901078055 -> 901078055 -> "90 107 80 55"
     """
     digits = re.sub(r"\D", "", phone or "")
 
-    # 998 bilan boshlansa → oxirgi 9 raqamni olamiz
     if digits.startswith("998") and len(digits) >= 12:
         digits = digits[-9:]
 
