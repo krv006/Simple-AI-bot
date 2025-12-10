@@ -13,18 +13,12 @@ from ..order_dataset_db import save_order_dataset_row
 from ..storage import finalize_session, clear_session, save_order_to_json
 from .ai_check_logger import send_ai_check_log
 from .order_utils import build_final_texts, append_dataset_line
-
-# LangChain structured output (voice uchun yozgan funksiyani umumiy foydalanamiz)
 from bot.ai.voice_order_structured import extract_order_structured
 
 logger = logging.getLogger(__name__)
 
 
 async def auto_remove_cancel_keyboard(order_message: Message, delay: int = 30):
-    """
-    N sekunddan keyin inline keyboardni avtomatik olib tashlash.
-    DB statusiga tegmaydi, faqat tugmani o'chiradi.
-    """
     await asyncio.sleep(delay)
     try:
         await order_message.edit_reply_markup(reply_markup=None)
@@ -38,13 +32,8 @@ def _clean_products_with_structured(
     amount: Optional[int],
     client_name: Optional[str],
 ) -> List[str]:
-    """
-    Mahsulot matnidan 'Bahodir 983373630', '277 000' kabi qatorlarni olib tashlaydi.
-    Telefon va summa allaqachon alohida fieldlarda ketadi.
-    """
     cleaned: List[str] = []
 
-    # Telefon suffixlari (oxirgi 7–9 raqami) bo'yicha filtrlaymiz
     phone_suffixes: List[str] = []
     for p in phones:
         digits = "".join(ch for ch in p if ch.isdigit())
@@ -63,18 +52,18 @@ def _clean_products_with_structured(
         digits_in_line = "".join(ch for ch in line_stripped if ch.isdigit())
         skip = False
 
-        # 1) Agar qatorda telefon raqam bo‘lsa – tashlab yuboramiz
+        # 1) Telefon raqami bo'lsa – tashlab yuboramiz
         if digits_in_line:
             for suf in phone_suffixes:
                 if suf and suf in digits_in_line:
                     skip = True
                     break
 
-        # 2) Agar qatorda summa bo'lsa – tashlab yuboramiz
+        # 2) Summa bo'lsa – tashlab yuboramiz
         if not skip and amount_digits and amount_digits in digits_in_line:
             skip = True
 
-        # 3) Agar qatorda faqat ism bo'lsa va client_name shu bo'lsa – tashlab yuboramiz
+        # 3) Faqat ism bo'lib, client_name shu bo'lsa
         if (
             not skip
             and client_name
@@ -95,13 +84,8 @@ async def finalize_and_send_after_delay(
     base_message: Message,
     settings: Settings,
 ):
-    """
-    Session tayyor bo'lgach ham darhol emas, 5 sekunddan keyin finalize + send qiladi.
-    Shu orada kelgan qo'shimcha izoh xabarlar ham session.raw_messages ichiga tushadi.
-    """
     await asyncio.sleep(5)
 
-    # Eslatma: bu yerda finalize_session faqat key qabul qiladi (sizdagi hozirgi API shunaqa).
     finalized = finalize_session(key)
     logger.info("Delayed finalize for key=%s, finalized=%s", key, bool(finalized))
     if not finalized:
@@ -111,16 +95,14 @@ async def finalize_and_send_after_delay(
     user = base_message.from_user
     full_name = user.full_name if user and user.full_name else f"id={user.id}"
 
-    # build_final_texts – eski rule-based ajratish (phones/products/comments)
     client_phones, final_products, final_comments = build_final_texts(
         finalized.raw_messages, finalized.phones
     )
 
-    # --- LangChain structured output orqali yakuniy strukturani chiqaramiz ---
     text_for_ai = "\n".join(finalized.raw_messages)
 
     raw_phone_candidates = list(finalized.phones) if finalized.phones else client_phones
-    raw_amount_candidates = []
+    raw_amount_candidates: list[int] = []
     session_amount = getattr(finalized, "amount", None)
     if session_amount is not None:
         raw_amount_candidates.append(session_amount)
@@ -141,34 +123,25 @@ async def finalize_and_send_after_delay(
         logger.exception("Failed to run structured order extraction in finalize: %s", e)
         struct = None
 
-    # Agar AI muvaffaqiyatli bo'lsa – basic maydonlarni undan olamiz
     if struct is not None and getattr(struct, "is_order", False):
-        # Telefonlar
         if struct.phone_numbers:
             client_phones = struct.phone_numbers
 
-        # Summa
         if struct.amount is not None:
             final_amount = struct.amount
 
-        # Ism (customer_name / client_name kabi maydonlardan izlaymiz)
         client_name_parsed = (
             getattr(struct, "customer_name", None)
             or getattr(struct, "client_name", None)
             or None
         )
 
-        # Izoh/comment
         if getattr(struct, "comment", None):
             final_comments = [struct.comment]
 
-    # Telefonlar satri
     phones_str = ", ".join(client_phones) if client_phones else "—"
-
-    # Izoh
     comment_str = "\n".join(final_comments) if final_comments else "—"
 
-    # --- Mahsulot matnini tozalash ---
     raw_lines = text_for_ai.splitlines()
     cleaned_product_lines = _clean_products_with_structured(
         raw_lines=raw_lines,
@@ -178,7 +151,6 @@ async def finalize_and_send_after_delay(
     )
     products_str = "\n".join(cleaned_product_lines) if cleaned_product_lines else "—"
 
-    # Location
     loc = finalized.location
     if loc:
         if loc.get("type") == "telegram":
@@ -192,7 +164,6 @@ async def finalize_and_send_after_delay(
     else:
         loc_str = "—"
 
-    # SUMMA (sessiyadan yoki structured AI dan)
     amount = final_amount
     if amount is not None:
         amount_str = f"{amount:,}".replace(",", " ")
@@ -200,9 +171,8 @@ async def finalize_and_send_after_delay(
     else:
         amount_line = "💰 Summa: —"
 
-    # === 1) YAKUNIY AI_CHECK (faqat 1 ta yozuv, 1 zakaz uchun) ===
+    # AI_CHECK log
     try:
-        final_text_for_ai = text_for_ai
         final_ai_result = {
             "role": "ORDER",
             "has_address_keywords": bool(loc),
@@ -215,13 +185,13 @@ async def finalize_and_send_after_delay(
         await send_ai_check_log(
             settings=settings,
             message=base_message,
-            text=final_text_for_ai,
+            text=text_for_ai,
             ai_result=final_ai_result,
         )
     except Exception as e:
         logger.error("Failed to send AI_CHECK log in finalize: %s", e)
 
-    # === 2) Avval ai_orders DB ga yozamiz va order_id olamiz ===
+    # ai_orders ga yozish
     order_id: Optional[int] = None
     try:
         order_id = save_order_row(
@@ -235,7 +205,7 @@ async def finalize_and_send_after_delay(
     except Exception as e:
         logger.error("Failed to save order to Postgres: %s", e)
 
-    # 3) ai_order_dataset ga hamma SMSlarni bitta qatorda yozamiz
+    # ai_order_dataset ga yozish
     try:
         if order_id is not None:
             messages = list(finalized.raw_messages) if finalized.raw_messages else []
@@ -254,14 +224,14 @@ async def finalize_and_send_after_delay(
                 len(messages),
             )
     except Exception as e:
-        logger.error("Failed to save order dataset row for order_id=%s: %s", order_id, e)
+        logger.error(
+            "Failed to save order dataset row for order_id=%s: %s", order_id, e
+        )
 
-    # 4) Sarlavhaga ID qo'shamiz
     header_line = "🆕 Yangi zakaz"
     if order_id is not None:
         header_line += f" (ID: {order_id})"
 
-    # 👤 Mijoz qatori: agar AI ism topgan bo'lsa, u ham chiqadi
     if client_name_parsed:
         client_line = (
             f"👤 Mijoz: {client_name_parsed} "
@@ -270,7 +240,6 @@ async def finalize_and_send_after_delay(
     else:
         client_line = f"👤 Mijoz: {full_name} (id: {user.id})"
 
-    # Yakuniy xabar matni
     msg_text = (
         f"{header_line}\n"
         f"👥 Guruhdan: {chat_title}\n"
@@ -282,7 +251,6 @@ async def finalize_and_send_after_delay(
         f"☕️ Mahsulot/zakaz matni:\n{products_str}"
     )
 
-    # JSON log – sizdagi eski API bo‘yicha, session obyektini berayapmiz
     try:
         save_order_to_json(finalized)
     except Exception as e:
@@ -290,7 +258,6 @@ async def finalize_and_send_after_delay(
 
     logger.info("Order saved to ai_bot.json for key=%s", key)
 
-    # Dataset fayl (order.txt) – text faylga yozish
     try:
         append_dataset_line(
             "order.txt",
@@ -310,7 +277,9 @@ async def finalize_and_send_after_delay(
             },
         )
     except Exception as e:
-        logger.warning("Failed to append orders_dataset.txt for order_id=%s: %s", order_id, e)
+        logger.warning(
+            "Failed to append orders_dataset.txt for order_id=%s: %s", order_id, e
+        )
 
     reply_markup = None
     if order_id is not None:

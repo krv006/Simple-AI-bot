@@ -24,8 +24,14 @@ from .order_manual import start_manual_order_after_cancel
 from .order_reply_update import handle_order_reply_update
 from .order_utils import (
     COMMENT_KEYWORDS,
+    append_dataset_line,  # NEW
+    make_timestamp,  # NEW
 )
 from ..ai.classifier import classify_text_ai
+from ..ai.voice_order_structured import (  # NEW
+    extract_order_structured,
+    VoiceOrderExtraction,
+)
 from ..config import Settings
 from ..db import cancel_order_row, save_voice_stt_row
 from ..storage import (
@@ -63,6 +69,8 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
 
         # === 1-qadam: textni tayyorlash (voice bo'lsa STT) ===
         text: str = ""
+        stt_text_for_dataset: str | None = None  # NEW
+        voice_ai_result: VoiceOrderExtraction | None = None  # NEW
 
         if message.voice:
             # Golos orqali kelgan bo‘lsa, Uzbekvoice bilan STT qilamiz
@@ -89,6 +97,7 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
 
                 if stt_text:
                     text = stt_text
+                    stt_text_for_dataset = stt_text  # NEW
                 else:
                     # fallback – agar caption bo‘lsa, shundan foydalanamiz
                     text = message.caption or ""
@@ -97,6 +106,23 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
                             "Golosni matnga o‘girishda xatolik bo‘ldi, keyinroq qayta urinib ko‘ring."
                         )
                         return
+
+                # NEW: STT matndan structured voice extraction (telefon/summa/izoh)
+                try:
+                    raw_phones_voice = extract_phones(text)
+                    raw_amount_candidates: list[int] = []  # hozircha bo'sh, keyin to'ldirishingiz mumkin
+
+                    voice_ai_result = extract_order_structured(
+                        settings,
+                        text=text,
+                        raw_phone_candidates=raw_phones_voice,
+                        raw_amount_candidates=raw_amount_candidates,
+                    )
+                    logger.info("Voice structured AI result: %s", voice_ai_result)
+
+                except Exception as e:
+                    logger.exception("Voice structured extraction error: %s", e)
+                    voice_ai_result = None
 
             except Exception as e:
                 logger.exception("Error while processing voice STT: %s", e)
@@ -135,11 +161,17 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         if text:
             session.raw_messages.append(text)
 
-        # Telefon raqamlar
+        # Telefon raqamlar – default rule-based
         had_phones_before = bool(session.phones)
         phones_in_msg = extract_phones(text)
         for p in phones_in_msg:
             session.phones.add(p)
+
+        # NEW: agar voice_ai_result bo'lsa, undagi telefonlarni ham sessiyaga qo'shamiz
+        if voice_ai_result is not None and voice_ai_result.phone_numbers:
+            for p in voice_ai_result.phone_numbers:
+                session.phones.add(p)
+
         phones_new = bool(session.phones) and not had_phones_before
 
         # Location
@@ -169,7 +201,7 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
                 pass
             # Pipeline davom etadi, faqat userga eslatma.
 
-        # === AI klassifikatsiya (LangChain Structured Output) ===
+        # === AI klassifikatsiya (matn bo'yicha, order-related yoki yo'q) ===
         ai_result = await classify_text_ai(settings, text, session.raw_messages)
         # kutiladigan maydonlar:
         # role: str
@@ -188,17 +220,26 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         source = ai_result.get("source", "UNKNOWN")
         amount = ai_result.get("amount")
 
+        # Agar voice structured AI summa topgan bo'lsa, undan ustun foydalanamiz
+        if voice_ai_result is not None and voice_ai_result.amount is not None:
+            session_amount_candidate = voice_ai_result.amount
+        else:
+            session_amount_candidate = amount
+
         # Agar AI summa topgan bo‘lsa – sessiyaga yozib qo‘yamiz
-        if amount is not None:
+        if session_amount_candidate is not None:
             try:
                 if getattr(session, "amount", None) in (None, 0):
-                    session.amount = int(amount)
+                    session.amount = int(session_amount_candidate)
             except Exception:
-                logger.warning("Failed to set session.amount from ai_result: %r", amount)
+                logger.warning(
+                    "Failed to set session.amount from AI candidate: %r",
+                    session_amount_candidate,
+                )
 
-        logger.info("AI result=%s", ai_result)
+        logger.info("AI result (classifier)=%s", ai_result)
 
-        # Agar message.voice bo'lsa, STT logini ham DB ga saqlab qo'yamiz
+        # Agar message.voice bo'lsa, STT logini DB ga saqlab qo'yamiz
         if message.voice:
             try:
                 save_voice_stt_row(
@@ -206,10 +247,42 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
                     message=message,
                     text=text,
                     phones=list(session.phones) if session.phones else phones_in_msg or None,
-                    amount=getattr(session, "amount", None) or amount,
+                    amount=getattr(session, "amount", None)
+                           or session_amount_candidate,
                 )
             except Exception as e:
                 logger.error("Failed to save voice STT row: %s", e)
+
+            # NEW: Voice dataset yig'ish (self-improve uchun)
+            try:
+                append_dataset_line(
+                    "data/voice_orders_dataset.jsonl",
+                    {
+                        "ts": make_timestamp(),
+                        "source": "voice",
+                        "chat_id": message.chat.id,
+                        "user_id": message.from_user.id if message.from_user else None,
+                        "raw_text": stt_text_for_dataset or text,
+                        "true_phones": (
+                            voice_ai_result.phone_numbers
+                            if voice_ai_result is not None
+                            else list(session.phones)
+                        ),
+                        "true_amount": (
+                            voice_ai_result.amount
+                            if voice_ai_result is not None
+                            else getattr(session, "amount", None)
+                        ),
+                        "true_address": None,  # ovozdan address chiqarishni keyin qo'shsak bo'ladi
+                        "comment": (
+                            voice_ai_result.comment
+                            if voice_ai_result is not None
+                            else None
+                        ),
+                    },
+                )
+            except Exception as e:
+                logger.error("Failed to append voice dataset line: %s", e)
 
         # === STATUS so'rovini ajratish (telefon/location yo'q bo'lsa) ===
         if not phones_in_msg and not message.location and text.strip():
@@ -324,10 +397,6 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
                 "Session is ready, but current message is not a finalize trigger."
             )
             return
-
-        # Sessionni shu yerning o'zida completed qilib qo'yamiz,
-        # shunda parallel kelgan xabarlar ikkinchi marta finalize chaqirmaydi
-        # session.is_completed = True
 
         asyncio.create_task(
             finalize_and_send_after_delay(

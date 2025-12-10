@@ -1,4 +1,5 @@
 # bot/ai/voice_order_structured.py
+import json
 from typing import List, Optional
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -6,6 +7,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
 from bot.config import Settings
+from .prompt_manager import load_prompt_config
 
 
 class VoiceOrderExtraction(BaseModel):
@@ -39,43 +41,81 @@ class VoiceOrderExtraction(BaseModel):
     )
 
 
+def _escape_braces(text: str) -> str:
+    """
+    ChatPromptTemplate ichida literal { } ishlatish uchun
+    ularni {{ }} ga almashtiramiz.
+    """
+    if not text:
+        return text
+    return text.replace("{", "{{").replace("}", "}}")
+
+
 def _build_prompt() -> ChatPromptTemplate:
     """
     AI-ga aniq instruksiya beradigan prompt.
+    Qoidalar prompt_config.json dan olinadi.
     """
-    system_msg = (
-        "Siz Telegram dostavka botining AI yordamchisiz. "
-        "Sizga STT (speech-to-text) orqali olingan xabar matni va "
-        "qoida asosida taxmin qilingan telefon/summa nomzodlari beriladi.\n\n"
-        "Sizning vazifangiz: yakuniy strukturali natijani to'g'ri va ishonchli qilish.\n\n"
-        "QOIDALAR:\n"
-        "1) Xabar O'ZBEK tilidagi og'zaki raqamlar va summalar bo'lishi mumkin.\n"
-        "2) Telefon raqami odatda 9 xonali raqam (masalan, 901078055), lekin "
-        "yakuniy natijada +998 bilan yozishingiz kerak: +998901078055.\n"
-        "3) Agar matnda telefon raqam so'z bilan aytilgan bo'lsa (masalan, "
-        "'yigirmalik nol nol nol o'n besh yigirma besh'), telefon sifatida "
-        "shu raqamni yig'ib chiqishingiz kerak. Summani telefon bilan aralashtirmang.\n"
-        "   - Masalan: 'yigirmalik nol nol nol o'n besh yigirma besh summasi besh yuz ming' "
-        "bo'lsa, telefon: +998200015255, summa: 500000.\n"
-        "4) Summani aniqlashda 'so'm', 'soum', 'сум' so'zlariga e'tibor bering. "
-        "Masalan: 'besh yuz ming so'm' -> 500000.\n"
-        "5) Agar birinchi raqamlar telefon raqami bo'lsa, keyingi raqamlar summa bo'lishi mumkin. "
-        "Telefon va summani aralashtirmang.\n"
-        "6) phone_numbers faqat mijozni chaqirish uchun kerak bo'lgan telefon(lar). "
-        "Shop, reklama, yoki boshqa raqamlarni kiritmang.\n"
-        "7) comment maydoniga mijoz so'zlarini qisqa, tushunarli ko'rinishda yozing. "
-        "Address/region/mahalla, qo'shimcha so'zlar ham shu yerga kirishi mumkin.\n"
-        "8) Agar xabar umuman zakaz emas bo'lsa (faqat 'Salom', "
-        "'rahmat' va h.k.), is_order=False qiling, phone_numbers bo'sh, amount=None.\n"
+    config, config_hash = load_prompt_config()
+    rules = config.get("rules", {})
+    examples = config.get("examples", [])
+    output_schema = config.get("output_schema", {})
+
+    system_parts: list[str] = []
+
+    meta = config.get("meta", {})
+    desc = meta.get("description")
+    if desc:
+        system_parts.append(_escape_braces(desc))
+
+    system_parts.append(
+        _escape_braces(
+            "Siz Telegram dostavka botining AI yordamchisiz. "
+            "Sizga STT (speech-to-text) orqali olingan xabar matni va "
+            "rule-based topilgan telefon/summa nomzodlari beriladi. "
+            "Siz yakuniy strukturali natijani to'g'ri va ishonchli qilishingiz kerak."
+        )
     )
 
+    # RULES bo'limini qo'shamiz
+    for section, items in rules.items():
+        system_parts.append(_escape_braces(f"\n[{section.upper()} QOIDALARI]:"))
+        for rule in items:
+            system_parts.append(_escape_braces(f"- {rule}"))
+
+    # output_schema ni JSON ko'rinishida qo'shamiz (lekin {} larni escape qilamiz)
+    if output_schema:
+        schema_json = json.dumps(output_schema, ensure_ascii=False, indent=2)
+        system_parts.append(
+            _escape_braces(
+                "\nChiqarilishi kerak bo'lgan JSON struktura tavsifi (output_schema):"
+            )
+        )
+        system_parts.append(_escape_braces(schema_json))
+
+    # examples larni ham qo'shamiz
+    if examples:
+        system_parts.append(_escape_braces("\nMisollar (input -> expected_output):"))
+        for ex in examples[:3]:
+            inp = ex.get("input", "")
+            expected = ex.get("expected_output", {})
+            expected_json = json.dumps(expected, ensure_ascii=False)
+
+            system_parts.append(_escape_braces(f"Input:\n{inp}"))
+            system_parts.append(
+                _escape_braces("Expected JSON:\n" + expected_json)
+            )
+
+    system_msg = "\n".join(system_parts)
+
+    # Human xabar – faqat uchta placeholder: text, raw_phone_candidates, raw_amount_candidates
     human_msg = (
         "Asosiy ma'lumotlar:\n"
-        "STT matn: \"{text}\"\n\n"
+        "STT matn yoki xabar matni: \"{text}\"\n\n"
         "Raw telefon kandidatlari (rule-based): {raw_phone_candidates}\n"
         "Raw summa kandidatlari (rule-based): {raw_amount_candidates}\n\n"
-        "Yuqoridagi ma'lumotlar asosida VoiceOrderExtraction strukturasi bo'yicha "
-        "aniq va to'g'ri natijani qaytaring."
+        "Yuqoridagi ma'lumotlar asosida VoiceOrderExtraction strukturasiga mos "
+        "aniq natija qaytaring."
     )
 
     return ChatPromptTemplate.from_messages(

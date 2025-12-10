@@ -9,6 +9,78 @@ from .config import Settings
 
 _connection = None
 
+import json  # tepada bo'lmasa, qo'shing
+
+
+def load_orders_for_prompt_dataset(
+        settings: Settings,
+        limit: int = 200,
+):
+    """
+    prompt optimizer uchun ai_orders jadvalidan so'nggi N ta yozuvni olib beradi.
+    Qaytadi: List[dict] with keys:
+      - raw_text
+      - true_phones
+      - true_amount
+      - true_address
+    """
+    conn = _get_connection(settings)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                order_text,
+                phones,
+                amount,
+                location
+            FROM ai_orders
+            WHERE order_text IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT %s;
+            """,
+            (limit,),
+        )
+        rows = cur.fetchall()
+
+    records = []
+    for order_text, phones, amount, location in rows:
+        if not order_text:
+            continue
+
+        true_phones = phones or []
+        true_amount = int(amount) if amount is not None else None
+
+        true_address = None
+        if location is not None:
+            if isinstance(location, dict):
+                true_address = (
+                        location.get("address")
+                        or location.get("raw")
+                        or None
+                )
+            else:
+                try:
+                    loc_obj = json.loads(location)
+                    true_address = (
+                            loc_obj.get("address")
+                            or loc_obj.get("raw")
+                            or None
+                    )
+                except Exception:
+                    true_address = None
+
+        records.append(
+            {
+                "raw_text": order_text,
+                "true_phones": true_phones,
+                "true_amount": true_amount,
+                "true_address": true_address,
+            }
+        )
+
+    return records
+
 
 def _get_connection(settings: Settings):
     global _connection
@@ -80,7 +152,6 @@ def init_db(settings: Settings) -> None:
             );
             """
         )
-
 
         cur.execute(
             """
@@ -326,7 +397,6 @@ def save_error_row(
         message: Message,
         text: str,
 ) -> int:
-
     conn = _get_connection(settings)
     user = message.from_user
 
