@@ -19,6 +19,7 @@
       "Xabarda raqamlar matn bilan aytilishi mumkin: 'to'qson', 'bir yuz o'n bir', 'to'qqiz yuz to'qson to'qqiz' va hokazo.",
       "So'zdan raqamga aylantirishni qo'llang: 'to'qson' -> 90, 'bir yuz o'n bir' -> 111.",
       "Lekin 'to'qsonlik', 'yetmishlik', 'yetmish yettilik', 'to'qson birlik', 'to'qsonlik birlik', 'yetmishlik birlik' kabi so'zlarni telefon raqam qismi deb qabul qilmang, bu so'zlar ko'pincha tarif yoki boshqa ma'no uchun ishlatiladi.",
+      "Shuningdek, 'to'qsonlik', 'yetmishlik', 'to'qson birlik', 'yetmish birlik', 'to'qsonlik birlik', 'yetmishlik birlik' kabi so'zlarni ham telefon raqam qismi deb qabul qilmang.",
       "Agar matnda bitta to'liq 9 xonali raqam (998 bilan yoki 9xx bilan) bo'lsa, uni telefon raqam deb qabul qiling.",
       "Agar raqam oldida 'raqam', 'telefon', 'nomer' kabi so'zlar bo'lsa, bu telefon raqam bo'lish ehtimoli yuqori.",
       "Bir xabarda bir nechta telefon bo'lishi mumkin; barchasini massiv sifatida qaytaring.",
