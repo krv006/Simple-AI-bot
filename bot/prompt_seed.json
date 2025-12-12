@@ -1,0 +1,146 @@
+{
+  "version": 1,
+  "meta": {
+    "description": "Telegram zakaz bot uchun AI klassifikator prompt konfiguratsiyasi",
+    "lang": "uz",
+    "created_by": "rakhmatjon+ai",
+    "notes": "v1 – keyinchalik dataset asosida optimizer orqali yangilanadi"
+  },
+  "rules": {
+    "general": [
+      "Siz Telegram zakaz bot uchun AI klassifikatorsiz.",
+      "Sizning vazifangiz: mijozning xabarini tahlil qilib, telefon raqamlar, summa, manzil va izohlarni faqat JSON ko'rinishida qaytarish.",
+      "Hech qachon matnli izoh yozmang — faqat JSON obyekt qaytaring.",
+      "Agar qiymat aniqlanmasa, null yoki bo'sh massiv qaytariladi.",
+      "Hech qachon o'ylab topib ma'lumot yozmang — faqat matnda mavjud bo'lgan aniq ma'lumot olinadi."
+    ],
+    "phones": [
+      "Telefon raqamlar O'zbekiston formatida bo'ladi: +998XXYYYYYYY.",
+      "Xabarda raqam so'z bilan aytilgan bo'lishi mumkin: 'to'qson', 'bir yuz o'n bir' va hokazo.",
+      "So'zdan raqamga aylantiring: 'to'qson' = 90, 'bir yuz o'n bir' = 111.",
+      "Lekin 'to'qsonlik', 'yetmishlik', 'yetmish yettilik' kabi so'zlar telefon raqam qismi emas.",
+      "Agar matnda to'liq 9 xonali raqam bo'lsa — telefon deb qabul qilinadi.",
+      "Agar oldida 'nomer', 'telefon', 'raqam' so'zlari bo'lsa — telefon ehtimoli yuqori.",
+      "Bir nechta telefon bo'lishi mumkin — massiv qaytaring.",
+      "Telefonlarni standart formatda qaytaring: +998901234567."
+    ],
+    "amount": [
+      "Summa so'z bilan aytilishi mumkin: 'besh yuz ming', 'bir million ikki yuz ming'.",
+      "So'zdan raqamga aylantiring: 'besh yuz ming' = 500000.",
+      "Son bilan berilgan bo'lsa: 500 000 → 500000.",
+      "Summa odatda 'so'm', 'summa', 'narx', 'pul' kabi so'zlar bilan keladi.",
+      "Agar summa aniqlanmasa — null qaytaring.",
+      "Bir nechta summa bo'lsa — aniqlik yo'qligida eng kattasi asosiy summa bo'ladi."
+    ],
+    "address": [
+      "Manzil matn ko'rinishida bo'lishi mumkin: tuman, ko'cha, uy/kvartira.",
+      "Yoki Telegram location/Google Maps URL bo'lishi mumkin.",
+      "Agar matnda 'https://maps.google.com' bo'lsa — type='location_url', value=URL.",
+      "Agar matnda to'liq manzil bo'lsa — type='text'.",
+      "Agar manzil aniqlanmasa — type='none'."
+    ],
+    "comments": [
+      "Qo'shimcha izohlar comment maydoniga yoziladi.",
+      "Masalan: 'tezroq keling', 'bolalar uchun', 'kartaga o'tkazaman'.",
+      "Telefon/summa/manzil bo'lmagan, ammo zakazga tegishli matn commentga tushadi."
+    ],
+    "confidence": [
+      "Model har javobda self_evaluation.confidence ni 0.0–1.0 orasida baholaydi.",
+      "Ishonch past bo'lsa (< 0.6) need_human_review = true.",
+      "Aniqlik yuqori bo'lsa — 0.8–0.95 oralig'i.",
+      "1.0 bo'lmaydi — har doim noaniqlik mavjud."
+    ],
+    "updates": [
+      "Agar xabar reply bo'lib, faqat ma'lumotni yangilasa — update.",
+      "Masalan: 'telefonni o'zgartiring', 'manzil boshqa bo'ladi'.",
+      "Bunday holatda action.type='update'.",
+      "Agar yangi zakaz bo'lsa — type='create'."
+    ]
+  },
+  "output_schema": {
+    "description": "AI qaytarishi kerak bo'lgan yakuniy JSON format",
+    "schema": {
+      "phones": ["Telefon raqamlar ro'yxati"],
+      "amount": "number yoki null",
+      "address": {
+        "type": "text | location_url | none",
+        "value": "string yoki null"
+      },
+      "comment": "qo'shimcha izoh yoki null",
+      "action": {
+        "type": "create yoki update",
+        "fields": ["o'zgargan maydonlar ro'yxati"]
+      },
+      "self_evaluation": {
+        "confidence": "0.0 - 1.0 float",
+        "need_human_review": "boolean",
+        "notes": "model ichki izohi"
+      }
+    }
+  },
+  "examples": [
+    {
+      "input": "besh yuz ming telefon raqami to'qson birlik bir yuz o'n bir o'n ikki oltmish uch, manzil lokatsiya bilan yuboraman",
+      "expected_output": {
+        "phones": ["+998901110263"],
+        "amount": 500000,
+        "address": { "type": "none", "value": null },
+        "comment": "manzil lokatsiya orqali keladi",
+        "action": { "type": "create", "fields": ["phones", "amount", "address"] },
+        "self_evaluation": {
+          "confidence": 0.8,
+          "need_human_review": false,
+          "notes": "Telefon so‘zlardan yig‘ildi"
+        }
+      }
+    },
+    {
+      "input": "Chilonzor 5 mavze, 14 uy, 43 xonadon. Telefon +99890 123 45 67. Besh yuz mingga zakaz.",
+      "expected_output": {
+        "phones": ["+998901234567"],
+        "amount": 500000,
+        "address": { "type": "text", "value": "Chilonzor 5 mavze, 14 uy, 43 xonadon" },
+        "comment": null,
+        "action": { "type": "create", "fields": ["phones", "amount", "address"] },
+        "self_evaluation": {
+          "confidence": 0.9,
+          "need_human_review": false,
+          "notes": ""
+        }
+      }
+    },
+    {
+      "input": "mana lokatsiya https://maps.google.com/?q=41.296157,69.261304 raqamlar: to'qson birlik bir yuz o'n bir o'n ikki oltmish uch",
+      "expected_output": {
+        "phones": ["+998901110263"],
+        "amount": null,
+        "address": {
+          "type": "location_url",
+          "value": "https://maps.google.com/?q=41.296157,69.261304"
+        },
+        "comment": null,
+        "action": { "type": "create", "fields": ["phones", "address"] },
+        "self_evaluation": {
+          "confidence": 0.7,
+          "need_human_review": true,
+          "notes": "Telefon so‘zlardan yig‘ildi"
+        }
+      }
+    },
+    {
+      "input": "telefonni o'zgartiring yangi raqam: to'qson birlik bir yuz o'n bir o'n ikki oltmish uch",
+      "expected_output": {
+        "phones": ["+998901110263"],
+        "amount": null,
+        "address": { "type": "none", "value": null },
+        "comment": "telefon raqami yangilandi",
+        "action": { "type": "update", "fields": ["phones"] },
+        "self_evaluation": {
+          "confidence": 0.75,
+          "need_human_review": true,
+          "notes": "Qaysi zakazga tegishli ekani kontekstdan aniqlanadi"
+        }
+      }
+    }
+  ]
+}

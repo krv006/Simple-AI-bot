@@ -13,6 +13,7 @@ from bot.handlers.orders import register_order_handlers
 from bot.handlers.status_checker import router as status_router
 from bot.handlers.voice_stt import register_voice_handlers
 from bot.order_dataset_db import init_order_dataset_table
+from bot.prompt_seed import seed_prompt_if_needed
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,6 +38,7 @@ async def main():
     register_voice_handlers(dp, settings)
     register_order_handlers(dp, settings)
     register_admin_prompt_handlers(dp, settings)
+    seed_prompt_if_needed(settings)
 
     await dp.start_polling(bot)
 

@@ -1,5 +1,7 @@
 # bot/db.py
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
+
+import json
 
 import psycopg2
 from aiogram.types import Message
@@ -9,8 +11,142 @@ from .config import Settings
 
 _connection = None
 
-import json  # tepada bo'lmasa, qo'shing
 
+def _get_connection(settings: Settings):
+    """
+    Bitta global connection. Autocommit yoqilgan.
+    """
+    global _connection
+    if _connection is None or _connection.closed:
+        if not settings.db_dsn:
+            raise RuntimeError("DB_DSN .env ichida ko'rsatilmagan, Postgresga ulana olmayman.")
+        _connection = psycopg2.connect(settings.db_dsn)
+        _connection.autocommit = True
+    return _connection
+
+
+def init_db(settings: Settings) -> None:
+    """
+    Barcha jadval va kerakli ustunlarni yaratib beradi.
+    """
+    conn = _get_connection(settings)
+    with conn.cursor() as cur:
+        # === ai_orders ===
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_orders (
+                id              SERIAL PRIMARY KEY,
+                user_message_id BIGINT,
+                user_id         BIGINT NOT NULL,
+                username        TEXT,
+                full_name       TEXT,
+                group_id        BIGINT NOT NULL,
+                group_title     TEXT,
+                order_text      TEXT,
+                phones          TEXT[],
+                location        JSONB,
+                amount          BIGINT,
+                is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+                cancelled_at    TIMESTAMPTZ,
+                created_at      TIMESTAMPTZ DEFAULT now()
+            );
+            """
+        )
+        # Eskidan qolgan bo'lishi mumkin, shuning uchun IF NOT EXISTS bilan yana bir marta tekshiramiz
+        cur.execute(
+            """
+            ALTER TABLE ai_orders
+            ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE ai_orders
+            ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE ai_orders
+            ADD COLUMN IF NOT EXISTS amount BIGINT;
+            """
+        )
+
+        # === ai_voice_logs ===
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_voice_logs (
+                id              SERIAL PRIMARY KEY,
+                user_message_id BIGINT,
+                user_id         BIGINT NOT NULL,
+                username        TEXT,
+                full_name       TEXT,
+                group_id        BIGINT NOT NULL,
+                group_title     TEXT,
+                voice_file_id   TEXT,
+                stt_text        TEXT,
+                phones          TEXT[],
+                amount          BIGINT,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+
+        # === ai_check_logs ===
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_check_logs (
+                id              SERIAL PRIMARY KEY,
+                user_message_id BIGINT,
+                user_id         BIGINT,
+                username        TEXT,
+                full_name       TEXT,
+                group_id        BIGINT,
+                group_title     TEXT,
+                text            TEXT,
+                ai              JSONB,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+
+        # === ai_error_logs ===
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_error_logs (
+                id              SERIAL PRIMARY KEY,
+                user_message_id BIGINT,
+                user_id         BIGINT,
+                username        TEXT,
+                full_name       TEXT,
+                group_id        BIGINT,
+                group_title     TEXT,
+                text            TEXT,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+
+        # === ai_prompt_configs ===
+        # qo'lda yoki optimizer orqali kiritiladigan prompt konfiguratsiyalar
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_prompt_configs (
+                id          SERIAL PRIMARY KEY,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                source      TEXT NOT NULL,          -- 'manual' | 'optimizer'
+                version     INTEGER NOT NULL,       -- 1, 2, 3 ...
+                is_active   BOOLEAN NOT NULL DEFAULT FALSE,
+                payload     JSONB NOT NULL
+            );
+            """
+        )
+        # version ustuniga index xohlasa qo'shsa bo'ladi, hozir shart emas
+
+
+# ======================================================================
+# PROMPT DATASET UCHUN ORDERLARNI OQISH
+# ======================================================================
 
 def load_orders_for_prompt_dataset(
         settings: Settings,
@@ -55,17 +191,17 @@ def load_orders_for_prompt_dataset(
         if location is not None:
             if isinstance(location, dict):
                 true_address = (
-                        location.get("address")
-                        or location.get("raw")
-                        or None
+                    location.get("address")
+                    or location.get("raw")
+                    or None
                 )
             else:
                 try:
                     loc_obj = json.loads(location)
                     true_address = (
-                            loc_obj.get("address")
-                            or loc_obj.get("raw")
-                            or None
+                        loc_obj.get("address")
+                        or loc_obj.get("raw")
+                        or None
                     )
                 except Exception:
                     true_address = None
@@ -82,110 +218,76 @@ def load_orders_for_prompt_dataset(
     return records
 
 
-def _get_connection(settings: Settings):
-    global _connection
-    if _connection is None or _connection.closed:
-        if not settings.db_dsn:
-            raise RuntimeError("DB_DSN .env ichida ko'rsatilmagan, Postgresga ulana olmayman.")
-        _connection = psycopg2.connect(settings.db_dsn)
-        _connection.autocommit = True
-    return _connection
+# ======================================================================
+# PROMPT CONFIG – ACTIVE CONFIGNI OQISH / YANGI VERSIYA YOZISH
+# ======================================================================
 
-
-def init_db(settings: Settings) -> None:
+def get_active_prompt_config(settings: Settings) -> Optional[Dict[str, Any]]:
+    """
+    Hozirda active bo'lgan prompt_config.payload ni qaytaradi (JSON sifatida).
+    Agar topilmasa, None.
+    """
     conn = _get_connection(settings)
     with conn.cursor() as cur:
         cur.execute(
             """
-            CREATE TABLE IF NOT EXISTS ai_orders (
-                id              SERIAL PRIMARY KEY,
-                user_message_id BIGINT,
-                user_id         BIGINT NOT NULL,
-                username        TEXT,
-                full_name       TEXT,
-                group_id        BIGINT NOT NULL,
-                group_title     TEXT,
-                order_text      TEXT,
-                phones          TEXT[],
-                location        JSONB,
-                amount          BIGINT,
-                is_active       BOOLEAN NOT NULL DEFAULT TRUE,
-                cancelled_at    TIMESTAMPTZ,
-                created_at      TIMESTAMPTZ DEFAULT now()
-            );
+            SELECT payload
+            FROM ai_prompt_configs
+            WHERE is_active = TRUE
+            ORDER BY id DESC
+            LIMIT 1;
             """
         )
-        cur.execute(
-            """
-            ALTER TABLE ai_orders
-            ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
-            """
-        )
-        cur.execute(
-            """
-            ALTER TABLE ai_orders
-            ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;
-            """
-        )
-        cur.execute(
-            """
-            ALTER TABLE ai_orders
-            ADD COLUMN IF NOT EXISTS amount BIGINT;
-            """
-        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return row[0]
+
+
+def create_prompt_config(
+        settings: Settings,
+        payload: Dict[str, Any],
+        source: str = "manual",
+        make_active: bool = True,
+) -> Dict[str, Any]:
+    """
+    Yangi prompt_config yozadi va xohlasa active qiladi.
+    version = oldingi max(version) + 1 bo'ladi.
+    """
+    conn = _get_connection(settings)
+    with conn.cursor() as cur:
+        # Avvalgi version topamiz
+        cur.execute("SELECT COALESCE(MAX(version), 0) FROM ai_prompt_configs;")
+        (max_version,) = cur.fetchone()
+        new_version = max_version + 1
+
+        if make_active:
+            # Oldingi active'larni o'chirib tashlaymiz
+            cur.execute("UPDATE ai_prompt_configs SET is_active = FALSE WHERE is_active = TRUE;")
 
         cur.execute(
             """
-            CREATE TABLE IF NOT EXISTS ai_voice_logs (
-                id              SERIAL PRIMARY KEY,
-                user_message_id BIGINT,
-                user_id         BIGINT NOT NULL,
-                username        TEXT,
-                full_name       TEXT,
-                group_id        BIGINT NOT NULL,
-                group_title     TEXT,
-                voice_file_id   TEXT,
-                stt_text        TEXT,
-                phones          TEXT[],
-                amount          BIGINT,
-                created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-            );
-            """
+            INSERT INTO ai_prompt_configs (source, version, is_active, payload)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id, created_at, source, version, is_active, payload;
+            """,
+            (source, new_version, make_active, Json(payload)),
         )
+        row = cur.fetchone()
 
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS ai_check_logs (
-                id              SERIAL PRIMARY KEY,
-                user_message_id BIGINT,
-                user_id         BIGINT,
-                username        TEXT,
-                full_name       TEXT,
-                group_id        BIGINT,
-                group_title     TEXT,
-                text            TEXT,
-                ai              JSONB,
-                created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-            );
-            """
-        )
+    return {
+        "id": row[0],
+        "created_at": row[1],
+        "source": row[2],
+        "version": row[3],
+        "is_active": row[4],
+        "payload": row[5],
+    }
 
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS ai_error_logs (
-                id              SERIAL PRIMARY KEY,
-                user_message_id BIGINT,
-                user_id         BIGINT,
-                username        TEXT,
-                full_name       TEXT,
-                group_id        BIGINT,
-                group_title     TEXT,
-                text            TEXT,
-                created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-            );
-            """
-        )
 
+# ======================================================================
+# ORDERS – SAQLASH / YANGILASH / CANCEL
+# ======================================================================
 
 def save_order_row(
         settings: Settings,
@@ -298,6 +400,10 @@ def update_order_row(
         return cur.rowcount > 0
 
 
+# ======================================================================
+# VOICE STT LOGS
+# ======================================================================
+
 def save_voice_stt_row(
         settings: Settings,
         *,
@@ -346,6 +452,10 @@ def save_voice_stt_row(
         voice_id = new_id_row[0]
         return voice_id
 
+
+# ======================================================================
+# AI CHECK / ERROR LOGS
+# ======================================================================
 
 def save_ai_check_row(
         settings: Settings,
