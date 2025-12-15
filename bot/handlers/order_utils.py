@@ -62,6 +62,13 @@ COMMENT_KEYWORDS = [
     "mavze",
     "район",
     "tuman",
+
+    "Kredit",
+    "Bez kredit",
+    "Hozirga naqt",
+    "Srochno naqt",
+    "Xozirga",
+
 ]
 
 
